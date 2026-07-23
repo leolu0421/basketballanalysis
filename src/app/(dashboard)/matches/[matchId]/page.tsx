@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { TaggingWorkspace } from "./tagging-workspace";
 import { ScoreForm } from "./score-form";
 import { deleteMatchAction } from "@/lib/actions/match-actions";
+import { getVideoAnalysisStatus } from "@/lib/actions/video-analysis-actions";
 
 export default async function MatchDetailPage({
   params,
@@ -19,7 +20,7 @@ export default async function MatchDetailPage({
   });
   if (!match) notFound();
 
-  const [players, events] = await Promise.all([
+  const [players, events, videoJob] = await Promise.all([
     prisma.player.findMany({
       where: { teamId: team.id },
       orderBy: { jerseyNumber: "asc" },
@@ -28,6 +29,7 @@ export default async function MatchDetailPage({
       where: { matchId },
       orderBy: { createdAt: "asc" },
     }),
+    getVideoAnalysisStatus(matchId),
   ]);
 
   return (
@@ -67,6 +69,7 @@ export default async function MatchDetailPage({
           youtubeVideoId={match.youtubeVideoId}
           players={players}
           events={events}
+          initialVideoJob={videoJob}
         />
       </div>
     </div>

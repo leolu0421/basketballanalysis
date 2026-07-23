@@ -8,6 +8,7 @@ import {
 import { ShotCourt } from "@/components/shot-court";
 import { STAT_LABELS, STAT_TYPES, isShotType, type StatType } from "@/lib/stat-types";
 import { logStatEventAction, deleteStatEventAction } from "@/lib/actions/match-actions";
+import { VideoAnalysisPanel } from "./video-analysis-panel";
 
 type Player = {
   id: string;
@@ -26,6 +27,19 @@ type StatEvent = {
   shotY: number | null;
 };
 
+type VideoAnalysisJob = {
+  id: string;
+  status: string;
+  progress: number;
+  errorMessage: string | null;
+  candidates: {
+    id: string;
+    videoTimestampSeconds: number;
+    previousScoreText: string | null;
+    scoreText: string | null;
+  }[];
+} | null;
+
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
@@ -37,11 +51,13 @@ export function TaggingWorkspace({
   youtubeVideoId,
   players,
   events,
+  initialVideoJob,
 }: {
   matchId: string;
   youtubeVideoId: string | null;
   players: Player[];
   events: StatEvent[];
+  initialVideoJob: VideoAnalysisJob;
 }) {
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(
     players[0]?.id ?? null
@@ -234,6 +250,13 @@ export function TaggingWorkspace({
             , Quarter {quarter}.
           </p>
         )}
+
+        <VideoAnalysisPanel
+          matchId={matchId}
+          hasVideo={Boolean(youtubeVideoId)}
+          initialJob={initialVideoJob}
+          onSeek={(seconds) => playerRef.current?.seekTo(seconds)}
+        />
       </div>
 
       {pendingShotType && (
