@@ -117,6 +117,11 @@ export async function logStatEventAction(input: {
   });
   if (!match) throw new Error("Match not found");
 
+  const player = await prisma.player.findFirst({
+    where: { id: parsed.data.playerId, teamId: team.id },
+  });
+  if (!player) throw new Error("Player not found");
+
   await prisma.statEvent.create({ data: parsed.data });
   revalidatePath(`/matches/${parsed.data.matchId}`);
   revalidatePath("/stats");
@@ -128,7 +133,7 @@ export async function deleteStatEventAction(eventId: string, matchId: string) {
   const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
   if (!match) throw new Error("Match not found");
 
-  await prisma.statEvent.delete({ where: { id: eventId } });
+  await prisma.statEvent.deleteMany({ where: { id: eventId, matchId } });
   revalidatePath(`/matches/${matchId}`);
   revalidatePath("/stats");
   revalidatePath("/performance");
