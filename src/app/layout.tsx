@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "superstat",
+  title: "hooplens",
   description: "Basketball team stats, video tagging, and performance tracking",
 };
 

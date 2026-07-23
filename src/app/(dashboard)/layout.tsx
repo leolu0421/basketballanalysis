@@ -1,6 +1,7 @@
 import { requireTeam } from "@/lib/current-user";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { logoutAction } from "@/lib/actions/auth-actions";
+import { Logo } from "@/components/logo";
 
 export default async function DashboardLayout({
   children,
@@ -18,9 +19,7 @@ export default async function DashboardLayout({
   return (
     <div className="flex min-h-screen flex-col">
       <header className="flex h-16 shrink-0 items-center justify-between bg-brand px-6">
-        <span className="text-xl font-extrabold tracking-tight text-navy">
-          superstat
-        </span>
+        <Logo monochrome />
         <form action={logoutAction}>
           <button
             type="submit"

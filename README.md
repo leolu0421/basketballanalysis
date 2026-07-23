@@ -1,4 +1,4 @@
-# superstat (basketball analytics MVP)
+# hooplens (basketball analytics MVP)
 
 A youth/club basketball team analytics platform: coach-entered stat tracking,
 video-linked shot/event tagging (via YouTube), per-game box scores, and
