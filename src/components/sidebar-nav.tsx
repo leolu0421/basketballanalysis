@@ -7,10 +7,11 @@ const LIVE_LINKS = [
   { href: "/matches", label: "Matches" },
   { href: "/players", label: "Players" },
   { href: "/stats", label: "Stats" },
+  { href: "/insights", label: "Insights" },
   { href: "/performance", label: "Performance" },
 ];
 
-const SOON_LINKS = ["Assistant Coach", "Insights", "Resources", "Credits"];
+const SOON_LINKS = ["Assistant Coach", "Resources", "Credits"];
 
 export function SidebarNav() {
   const pathname = usePathname();

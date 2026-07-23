@@ -173,6 +173,17 @@ export function computeBoxScoreByPlayer(
   return result;
 }
 
+export function computeTeamInsightsMetrics(team: BoxScoreLine) {
+  return {
+    shotMixPct: team.fg2Pct,
+    pointsPerShot: team.fga === 0 ? 0 : team.pts / team.fga,
+    assistRatePct: team.fgm === 0 ? 0 : (team.ast / team.fgm) * 100,
+    turnovers: team.tov,
+    rebounds: team.reb,
+    defensiveImpact: team.stl + team.blk,
+  };
+}
+
 export function sumBoxScoreLines(lines: BoxScoreLine[]): BoxScoreLine {
   const total = emptyBoxScoreLine("TEAM");
   for (const l of lines) {

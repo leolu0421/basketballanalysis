@@ -10,7 +10,7 @@ export function MatchSelector({
 }: {
   matches: { id: string; date: Date; opponentName: string }[];
   activeMatchId: string;
-  tab: string;
+  tab?: string;
   basePath: string;
 }) {
   const router = useRouter();
@@ -18,7 +18,10 @@ export function MatchSelector({
   return (
     <select
       defaultValue={activeMatchId}
-      onChange={(e) => router.push(`${basePath}?matchId=${e.target.value}&tab=${tab}`)}
+      onChange={(e) => {
+        const query = tab ? `matchId=${e.target.value}&tab=${tab}` : `matchId=${e.target.value}`;
+        router.push(`${basePath}?${query}`);
+      }}
       className="rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
     >
       {matches.map((m) => (

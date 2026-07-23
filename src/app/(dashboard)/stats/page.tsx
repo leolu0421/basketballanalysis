@@ -8,7 +8,7 @@ import {
 } from "@/lib/stats";
 import { ShotCourt } from "@/components/shot-court";
 import { isShotType } from "@/lib/stat-types";
-import { MatchSelector } from "./match-selector";
+import { MatchSelector } from "@/components/match-selector";
 
 function fmtPct(n: number) {
   return `${n.toFixed(1)}%`;
