@@ -7,8 +7,10 @@ season performance aggregation.
 ## Stack
 
 - Next.js 16 (App Router) + TypeScript + Tailwind CSS
-- Prisma + SQLite (swap to Postgres later by changing `datasource` in
-  `prisma/schema.prisma` and `DATABASE_URL`)
+- Prisma + Postgres (a free-tier host like [Neon](https://neon.tech) or
+  [Supabase](https://supabase.com) works fine — see Deploying to Vercel
+  below; use the same connection string for local dev too, there's no
+  local-only database)
 - Custom cookie-session auth (bcrypt + signed JWT), no third-party auth
   service
 
@@ -16,8 +18,8 @@ season performance aggregation.
 
 ```bash
 npm install
-cp .env.example .env   # then set a real AUTH_SECRET, and ANTHROPIC_API_KEY for AI insights
-npx prisma migrate dev
+cp .env.example .env   # set a real DATABASE_URL (Postgres), AUTH_SECRET, and ANTHROPIC_API_KEY
+npx prisma db push     # syncs the schema to your Postgres database
 npm run dev
 ```
 
@@ -32,6 +34,38 @@ against it. Box scores show up under Stats, season aggregates under
 Performance, and AI-generated analysis under Insights (once
 `ANTHROPIC_API_KEY` is set — without it, Insights shows a "not configured"
 state instead of erroring).
+
+## Deploying to Vercel
+
+This has to be done from your own Vercel account — an AI coding session
+can't authenticate as you or click through vercel.com. Steps:
+
+1. **Get a Postgres database.** Easiest: [neon.tech](https://neon.tech) →
+   new project → copy the connection string (use the "pooled connection"
+   one, and keep `?sslmode=require`).
+2. **Import the repo.** vercel.com → Add New → Project → import
+   `leolu0421/basketballanalysis` → select the `claude/sports-stats-platform-plan-2q2xkq`
+   branch (or merge it to `main` first if you'd rather deploy from there).
+3. **Set environment variables** in the Vercel project settings, before
+   the first deploy:
+   - `DATABASE_URL` — the Neon connection string from step 1
+   - `AUTH_SECRET` — any long random string (e.g. `openssl rand -hex 32`)
+   - `ANTHROPIC_API_KEY` — your Anthropic API key, for Insights to work
+4. **Deploy.** Vercel picks up the `vercel-build` script automatically
+   (`prisma generate && prisma db push && next build`), which syncs the
+   schema to your new database on every deploy — no separate migration
+   step needed.
+5. Once it's live, sign up fresh at your new URL (the local dev database
+   and this session's test accounts don't carry over).
+
+**Important — "Analyze video" (Suggested Moments) will not work on
+Vercel.** That feature shells out to `yt-dlp` and `ffmpeg` and runs for
+minutes — Vercel's serverless functions can't run long child processes
+or persist binaries like that. Everything else (auth, roster, matches,
+manual tagging, Stats, Performance, Insights) works fine on Vercel as-is.
+If you want video analysis working in production, it needs a separate
+host with a persistent Node process (VPS, Railway, Fly.io, Docker) — see
+the Video analysis section below.
 
 ## Scope (v1)
 
