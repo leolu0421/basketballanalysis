@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+  teams        Team[]
+}
+
+model Team {
+  id        String    @id @default(cuid())
+  name      String
+  division  String?
+  joinCode  String    @unique
+  ownerId   String
+  owner     User      @relation(fields: [ownerId], references: [id])
+  createdAt DateTime  @default(now())
+  players   Player[]
+  matches   Match[]
+}
+
+model Player {
+  id           String      @id @default(cuid())
+  teamId       String
+  team         Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  firstName    String
+  lastName     String
+  jerseyNumber String
+  email        String?
+  createdAt    DateTime    @default(now())
+  statEvents   StatEvent[]
+}
+
+model Match {
+  id              String      @id @default(cuid())
+  teamId          String
+  team            Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  opponentName    String
+  date            DateTime
+  teamScore       Int?
+  opponentScore   Int?
+  youtubeVideoId  String?
+  createdAt       DateTime    @default(now())
+  statEvents      StatEvent[]
+}
+
+model StatEvent {
+  id                     String   @id @default(cuid())
+  matchId                String
+  match                  Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  playerId               String
+  player                 Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  type                   String
+  quarter                Int      @default(1)
+  videoTimestampSeconds  Float?
+  shotX                  Float?
+  shotY                  Float?
+  createdAt              DateTime @default(now())
+}
