@@ -51,6 +51,8 @@ can't authenticate as you or click through vercel.com. Steps:
    - `DATABASE_URL` — the Neon connection string from step 1
    - `AUTH_SECRET` — any long random string (e.g. `openssl rand -hex 32`)
    - `ANTHROPIC_API_KEY` — your Anthropic API key, for Insights to work
+   - `RESEND_API_KEY` — a free [resend.com](https://resend.com) API key, for
+     "Forgot password" emails to send (see Password reset section below)
 4. **Deploy.** Vercel picks up the `vercel-build` script automatically
    (`prisma generate && prisma db push && next build`), which syncs the
    schema to your new database on every deploy — no separate migration
@@ -83,6 +85,26 @@ only) are also a natural next step.
 Known limitations: minutes played and +/- are not tracked (would require
 clock/lineup tracking), and shot locations are entered manually while
 reviewing the linked video rather than derived automatically.
+
+## Password reset
+
+`/login` → "Forgot password?" → `/forgot-password` (enter email) → an emailed
+link to `/reset-password?token=...` → set a new password. Tokens are random
+32-byte values, stored as a SHA-256 hash (`PasswordResetToken`), expire after
+1 hour, and are single-use (deleted once the password is changed). The
+request form always responds the same way whether or not the email has an
+account, so it can't be used to discover which emails are registered.
+
+Email is sent via [Resend](https://resend.com) (free tier). Without
+`RESEND_API_KEY` set, the forgot-password form shows a clear "not
+configured" error instead of silently failing. **Note:** without a verified
+sending domain in Resend, it falls back to their shared sandbox sender
+(`onboarding@resend.dev`), which has real deliverability limits (e.g. may
+only deliver to the email the Resend account itself is registered with) —
+verify a domain in Resend for reliable delivery to arbitrary users. This
+was not testable end-to-end in this session (no reachable Postgres or
+Resend from this sandbox) — verified via type-check/build only; confirm a
+real reset email arrives once deployed.
 
 ## Video analysis ("Suggested moments")
 

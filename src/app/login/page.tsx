@@ -1,18 +1,35 @@
 "use client";
 
-import { useActionState } from "react";
+import { Suspense, useActionState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { loginAction } from "@/lib/actions/auth-actions";
 import { Logo } from "@/components/logo";
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
+  );
+}
+
+function LoginForm() {
   const [state, formAction, pending] = useActionState(loginAction, undefined);
+  const searchParams = useSearchParams();
+  const justReset = searchParams.get("reset") === "success";
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="w-full max-w-sm rounded-2xl border border-black/5 bg-white p-8 shadow-sm">
         <Logo markClassName="h-9 w-9 text-navy" size="text-2xl" />
         <p className="mt-1 text-sm text-black/60">Log in to your coach account</p>
+
+        {justReset && (
+          <p className="mt-4 rounded-lg bg-brand/15 px-3 py-2 text-sm text-brand-dark">
+            Password updated — log in with your new password.
+          </p>
+        )}
 
         <form action={formAction} className="mt-6 space-y-4">
           <div>
@@ -25,7 +42,12 @@ export default function LoginPage() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-black/70">Password</label>
+            <div className="flex items-center justify-between">
+              <label className="block text-sm font-medium text-black/70">Password</label>
+              <Link href="/forgot-password" className="text-xs text-brand-dark">
+                Forgot password?
+              </Link>
+            </div>
             <input
               name="password"
               type="password"
