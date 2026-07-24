@@ -1,0 +1,7 @@
+# Player-tracking pipeline (scripts/track_players.py) — see README's Video
+# analysis section for what this is for and why it's optional/best-effort.
+# torch is pulled in automatically by ultralytics; no GPU required, but a GPU
+# host will run this substantially faster.
+ultralytics==8.4.104
+opencv-python-headless==5.0.0.93
+lap==0.5.13

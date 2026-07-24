@@ -120,19 +120,54 @@ every 15 seconds, and asks Claude (vision, structured outputs) to
 transcribe the on-screen scoreboard in each frame. Consecutive readings
 are diffed into candidate scoring moments (e.g. "12:34 — 42-38 → 44-38").
 
-For each candidate, a second vision pass looks at the short frame
-sequence around that moment plus the team roster and guesses **who
-scored and what kind of shot it was** (2PT/3PT/FT made — candidates only
-exist where the score went up, so misses aren't covered). The guess uses
-jersey number, jersey color, ball possession, court position, and
-relative build across the frame sequence as corroborating cues, and the
-shot-type guess leans on the scoreboard point delta (a jump of exactly 3
-is a three, exactly 1 is a free throw) rather than judging shot arc
-visually — that part is arithmetic, not vision. Free throws are the most
-reliable guess since the scene (stoppage, isolated shooter at the line)
-is visually distinct; the weakest link is telling a 2PT jumper from a
-3PT jumper purely by foot position relative to the arc on blurry
-single-angle footage.
+For each candidate, a second pass tries to identify **who scored and
+what kind of shot it was** (2PT/3PT/FT made — candidates only exist
+where the score went up, so misses aren't covered). This has two paths:
+
+- **Preferred: player tracking.** `scripts/track_players.py` runs a
+  pretrained YOLOv8 person detector plus ByteTrack (both off-the-shelf,
+  COCO-trained — nothing here is trained on basketball footage or on
+  your team) over a short ffmpeg-cut clip around the candidate's
+  timestamp. This gives each person on screen a persistent track ID for
+  that clip and crops a zoomed torso close-up per track. Those crops —
+  not the wide-shot frame — are what get sent to Claude vision to read a
+  jersey number against, since a zoomed close-up reads far more reliably
+  than a small blurry digit in a wide shot. **This is not a custom-trained
+  model recognizing your specific players** — it's a generic tracker
+  finding "a person" and holding their identity for a few seconds,
+  combined with the same Claude OCR read as before on a better crop.
+  Requires Python 3.10+ and the packages in `requirements.txt`
+  (`ultralytics`, `opencv-python-headless`, `lap`) on the host —
+  `pip install -r requirements.txt`. First run downloads YOLOv8n weights
+  (~6MB) from GitHub. This step is naturally slower than the rest of the
+  pipeline (a fresh detection pass per candidate clip, CPU-only unless
+  the host has a GPU) and adds real time on top of an already
+  multi-minute job.
+- **Fallback: wide-frame guessing.** If Python/the tracking deps aren't
+  installed, or the tracking step errors for any reason, the pipeline
+  automatically falls back to the original approach — showing Claude the
+  raw sampled frames around the candidate directly, using jersey number,
+  jersey color, ball possession, court position, relative build, and any
+  visible referee signal as corroborating cues. So video analysis still
+  works without the Python setup, just with the coarser guess quality
+  from before. Once tracking fails once in a job, later candidates skip
+  straight to this fallback rather than retrying a broken pipeline
+  candidate-by-candidate.
+
+Either way, the shot-type guess leans on the scoreboard point delta (a
+jump of exactly 3 is a three, exactly 1 is a free throw) rather than
+judging shot arc visually — that part is arithmetic, not vision. Free
+throws are the most reliable guess since the scene (stoppage, isolated
+shooter at the line) is visually distinct; the weakest link is telling a
+2PT jumper from a 3PT jumper purely by position relative to the arc.
+
+**Can this become a model trained specifically on your team?** That's a
+materially bigger, separate project — see the "Can this AI learn from
+provided stats?" note further down for what that would actually take
+(a labeled dataset, a trained jersey-number classifier, GPU training
+infra). What's built here is Phase 1 of that path: real, tested,
+off-the-shelf tracking that improves crop quality today with zero
+training data required — not a shortcut to full custom recognition.
 
 Suggestions are shown under "Suggested moments" as **AI guess: #2 Harper
 — 2PT Made** with Confirm / Edit / Dismiss — clicking the timestamp
@@ -153,13 +188,17 @@ bytes even to the uploader, so this is a gray area against YouTube's
 Terms of Service, accepted here because it's the user's own footage and
 downloading it is the only way to avoid a manual upload step.
 
-**Deployment implication:** this pipeline shells out to `yt-dlp` and
-`ffmpeg` and runs for minutes per video. That needs a persistent Node
-process — it will **not** work on Vercel-style serverless functions
-(execution timeouts, no long-running child processes). It requires a
-host like a VPS, Railway, Fly.io, or a Docker deployment with those
-binaries installed, or moving this specific job to a dedicated background
-worker/queue if deployed alongside a serverless frontend.
+**Deployment implication:** this pipeline shells out to `yt-dlp`,
+`ffmpeg`, and (for the tracking guess path) `python3`, and runs for
+minutes per video. That needs a persistent Node process — it will
+**not** work on Vercel-style serverless functions (execution timeouts,
+no long-running child processes). It requires a host like a VPS,
+Railway, Fly.io, or a Docker deployment with those binaries installed
+(`pip install -r requirements.txt` for the Python side), or moving this
+specific job to a dedicated background worker/queue if deployed
+alongside a serverless frontend. The tracking step is optional at
+runtime — it fails gracefully into the wide-frame fallback if Python or
+its deps aren't set up on the host — but it won't ever run without them.
 
 **Reference stats check:** on the Stats page's Player Stats tab, coaches
 can optionally type in per-player 2PT/3PT/FT-made and foul counts from
@@ -169,18 +208,25 @@ mismatch. This is a manual cross-check, not a training signal — it
 doesn't change how future AI suggestions are generated (see the "Can
 this AI learn from provided stats?" note below).
 
-**Can this AI learn from provided stats?** No — each vision call is
-independent with no memory across games, and Claude isn't
-fine-tuned/retrained from data entered into this app. Real accuracy
-improvement would require a fundamentally different, much larger build:
-a labeled dataset (bounding boxes, jersey numbers, event timestamps
-across many hours of footage), a dedicated multi-object tracking model
-to hold a persistent per-player identity across the video, and a trained
-action-recognition model for event classification — the kind of system
-dedicated sports-analytics companies build with multi-camera rigs, not
-something addable to this codebase. The reference-stats check above is
-the practical alternative: it doesn't make the AI smarter, but it makes
-inaccuracies visible so a coach can catch and fix them per game.
+**Can this AI learn from provided stats?** No — each Claude vision call
+is independent with no memory across games, and Claude itself isn't
+fine-tuned/retrained from data entered into this app (no such
+fine-tuning API exists for it). What *is* in this codebase now (see
+"player tracking" above) is an off-the-shelf, pretrained person
+detector + tracker (YOLOv8 + ByteTrack, trained on generic COCO photos,
+not on your team) that holds a per-clip identity for whoever's on
+screen and crops them for a better OCR read — that's real tracking, but
+it doesn't know your specific players or "learn" anything from your
+data; it just finds "a person" generically. Going further — a model
+that's actually trained to recognize your team's jersey numbers, or a
+true action-recognition model that classifies rebounds/fouls/assists
+instead of relying on the scoreboard delta — would need its own labeled
+dataset (a few hundred+ hand-labeled examples) and GPU training time
+(e.g. a Colab notebook), which is a separate follow-on project, not
+something that happens automatically from stats typed into this app.
+The reference-stats check above is today's practical alternative: it
+doesn't make the AI smarter, but it makes inaccuracies visible so a
+coach can catch and fix them per game.
 
 **What's untested:** the download step (`yt-dlp` → `ffmpeg` → Claude
 vision) could not be exercised end-to-end during development — the dev
@@ -195,3 +241,15 @@ real game video once deployed somewhere with normal internet access.**
 The player-guessing pass fails gracefully (candidates still show up with
 no guess, just an empty player/stat picker) if that second vision call
 errors, so a bad guess-pass run shouldn't block tagging entirely.
+
+`scripts/track_players.py` and its ffmpeg-clip-cut → tracking → crop
+chain were tested end-to-end in the dev sandbox and confirmed working
+(detection, persistent track IDs, torso crops all produced correctly) —
+but only against a synthetic test video (a still photo of people panned
+across frames), since real basketball footage isn't reachable from this
+sandbox either. **Confirm detection quality against a real game video**
+— a fixed, distant broadcast angle with fast-moving, frequently
+occluded players is a much harder case than the synthetic test, so
+expect the person detector to miss players or false-positive on
+spectators/coaches sometimes; that's exactly why guesses stay
+confirm-or-correct rather than auto-logged.

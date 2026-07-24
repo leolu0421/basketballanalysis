@@ -44,3 +44,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# player-tracking model weights (auto-downloaded by ultralytics on first run)
+*.pt
+__pycache__/
+*.pyc

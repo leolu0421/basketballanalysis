@@ -152,3 +152,70 @@ Cross-check these cues against each other within the sequence before deciding �
 
   return response.parsed_output.guesses;
 }
+
+const TrackGuessSchema = z.object({
+  trackId: z.number().int().nullable(),
+  jerseyNumber: z.string().nullable(),
+  statType: z.enum(MADE_SHOT_TYPES).nullable(),
+});
+
+export type TrackGuess = z.infer<typeof TrackGuessSchema>;
+export type TrackToGuess = { trackId: number; crops: string[] };
+
+/**
+ * Preferred, higher-fidelity guess path: instead of reading a jersey number
+ * off a wide-shot frame, this takes pre-cropped torso close-ups from a
+ * player-tracking pass (see scripts/track_players.py — YOLO person detection
+ * + ByteTrack, so each trackId is the same physical person across the clip)
+ * and asks Claude to read jersey numbers off the zoomed crops instead. Falls
+ * back to guessCandidateStatsBatch's wide-frame approach where tracking
+ * isn't available (see pipeline.ts).
+ */
+export async function guessCandidateFromTracks(
+  candidate: { previousScoreText: string; scoreText: string },
+  tracks: TrackToGuess[],
+  roster: RosterPlayer[]
+): Promise<TrackGuess> {
+  if (tracks.length === 0) {
+    return { trackId: null, jerseyNumber: null, statType: null };
+  }
+  const anthropic = getClient();
+
+  const rosterText = roster.map((p) => `#${p.jerseyNumber} ${p.firstName} ${p.lastName}`).join(", ");
+
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; source: { type: "base64"; media_type: "image/jpeg"; data: string } }
+  > = [
+    {
+      type: "text",
+      text: `You are reviewing a basketball scoring moment to help a coach identify which of OUR roster players scored. Our roster (jersey number and name): ${rosterText}. The on-screen scoreboard changed from ${candidate.previousScoreText} to ${candidate.scoreText} around this moment. Below are cropped, zoomed-in torso images of each person who was tracked on screen near this moment, grouped by trackId — a person-tracking pass already confirmed all crops under the same trackId are the same physical person, so cross-reference all of a track's crops together (a number blurry in one crop may be clear in another of the same track) before deciding what jersey number it shows. These crops are zoomed in specifically so jersey numbers are more readable than in a wide shot — trust a clear digit read here over general court-position guessing. For each track, try to read a jersey number. Then decide which trackId, if any, is the player who scored: it must have a jersey number matching one of our roster's numbers above. Report that trackId and the jersey number you read — or null for both if no track clearly matches one of our players (e.g. the crops are too blurry, or it looks like the opposing team scored). Also report statType (FG2_MADE, FG3_MADE, or FT_MADE) using the score delta and whatever court context is visible in the crops — null if you can't reasonably tell.`,
+    },
+  ];
+
+  for (const track of tracks) {
+    content.push({ type: "text", text: `trackId=${track.trackId}:` });
+    for (const cropPath of track.crops) {
+      const data = (await readFile(cropPath)).toString("base64");
+      content.push({
+        type: "image",
+        source: { type: "base64", media_type: "image/jpeg", data },
+      });
+    }
+  }
+
+  const response = await anthropic.messages.parse({
+    model: "claude-opus-4-8",
+    max_tokens: 1024,
+    messages: [{ role: "user", content }],
+    output_config: {
+      format: zodOutputFormat(TrackGuessSchema),
+    },
+  });
+
+  if (!response.parsed_output) {
+    throw new Error("Vision analysis did not return a valid structured response");
+  }
+
+  return response.parsed_output;
+}

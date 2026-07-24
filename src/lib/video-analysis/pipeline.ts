@@ -1,14 +1,24 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
-import { readScoreboardBatch, guessCandidateStatsBatch, type FrameRead, type CandidateToGuess } from "./vision";
+import {
+  readScoreboardBatch,
+  guessCandidateStatsBatch,
+  guessCandidateFromTracks,
+  type FrameRead,
+  type CandidateToGuess,
+  type TrackToGuess,
+} from "./vision";
 import { buildScoreCandidates, type ScoreCandidate } from "./candidates";
 
 const FRAME_INTERVAL_SECONDS = 15;
 const FRAMES_PER_VISION_CALL = 10;
 const CANDIDATES_PER_GUESS_CALL = 4;
+const TRACK_CLIP_PADDING_SECONDS = 4;
+const TRACK_SAMPLE_FPS = 5;
+const TRACK_SCRIPT_PATH = path.join(process.cwd(), "scripts", "track_players.py");
 
 function run(cmd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -37,15 +47,79 @@ async function updateJob(
 type RosterPlayer = { id: string; jerseyNumber: string; firstName: string; lastName: string };
 type CandidateGuessResult = { jerseyNumber: string | null; statType: string | null; playerId: string | null };
 
+function resolvePlayerId(
+  jerseyNumber: string | null,
+  roster: RosterPlayer[]
+): string | null {
+  if (!jerseyNumber) return null;
+  const player = roster.find(
+    (p) => p.jerseyNumber.trim().toLowerCase() === jerseyNumber.trim().toLowerCase()
+  );
+  return player?.id ?? null;
+}
+
 /**
- * For each score-change candidate, grabs the short frame sequence around its
- * timestamp and asks Claude vision to guess the scoring player + shot type.
- * Best-effort: a failed batch just leaves those candidates unguessed rather
- * than failing the whole job, since the scoreboard candidates are still
- * useful on their own.
+ * Runs YOLO person detection + ByteTrack tracking (scripts/track_players.py)
+ * on a short clip around a candidate's timestamp, returning cropped torso
+ * images per tracked person — zoomed close-ups read jersey numbers far more
+ * reliably than a wide-shot frame. Requires Python 3 + the deps in
+ * requirements.txt on the host; throws if unavailable so the caller can fall
+ * back to the wide-frame approach.
+ */
+async function trackCandidate(
+  videoPath: string,
+  workDir: string,
+  index: number,
+  timestampSeconds: number
+): Promise<TrackToGuess[]> {
+  const clipStart = Math.max(0, timestampSeconds - TRACK_CLIP_PADDING_SECONDS);
+  const clipDuration = TRACK_CLIP_PADDING_SECONDS * 2;
+  const clipPath = path.join(workDir, "clips", `candidate_${index}.mp4`);
+  const trackOutDir = path.join(workDir, "tracks", `candidate_${index}`);
+  await mkdir(path.dirname(clipPath), { recursive: true });
+
+  await run("ffmpeg", [
+    "-ss",
+    String(clipStart),
+    "-i",
+    videoPath,
+    "-t",
+    String(clipDuration),
+    "-an",
+    clipPath,
+  ]);
+
+  await run("python3", [
+    TRACK_SCRIPT_PATH,
+    clipPath,
+    trackOutDir,
+    "--fps",
+    String(TRACK_SAMPLE_FPS),
+    "--start",
+    "0",
+    "--end",
+    String(clipDuration),
+  ]);
+
+  const raw = await readFile(path.join(trackOutDir, "tracks.json"), "utf-8");
+  const parsed = JSON.parse(raw) as { tracks: { trackId: number; crops: string[] }[] };
+  return parsed.tracks;
+}
+
+/**
+ * For each score-change candidate, tries to identify the scoring player via
+ * the tracking + cropped-jersey pipeline first, falling back to the older
+ * wide-frame guess if tracking isn't available on this host (or fails) —
+ * once tracking fails once, later candidates skip straight to the fallback
+ * rather than retrying a broken pipeline per candidate. Best-effort
+ * throughout: a failure just leaves a candidate unguessed rather than
+ * failing the whole job, since the scoreboard candidates are still useful
+ * on their own.
  */
 async function guessCandidatePlayers(
   candidates: ScoreCandidate[],
+  videoPath: string,
+  workDir: string,
   framesDir: string,
   frameFiles: string[],
   roster: RosterPlayer[]
@@ -53,40 +127,70 @@ async function guessCandidatePlayers(
   const results: Array<CandidateGuessResult | undefined> = new Array(candidates.length).fill(undefined);
   if (roster.length === 0) return results;
 
-  const toGuess: CandidateToGuess[] = candidates.map((c, index) => {
-    const centerIndex = Math.round(c.videoTimestampSeconds / FRAME_INTERVAL_SECONDS);
-    const frameIndices = [centerIndex - 1, centerIndex, centerIndex + 1].filter(
-      (i, idx, arr) => i >= 0 && i < frameFiles.length && arr.indexOf(i) === idx
-    );
-    return {
-      index,
-      previousScoreText: c.previousScoreText,
-      scoreText: c.scoreText,
-      frames: frameIndices.map((i) => ({
-        path: path.join(framesDir, frameFiles[i]),
-        timestampSeconds: i * FRAME_INTERVAL_SECONDS,
-      })),
-    };
-  });
+  let trackingAvailable = true;
+  const fallbackIndices: number[] = [];
 
-  for (let i = 0; i < toGuess.length; i += CANDIDATES_PER_GUESS_CALL) {
-    const batch = toGuess.slice(i, i + CANDIDATES_PER_GUESS_CALL);
+  for (let index = 0; index < candidates.length; index++) {
+    if (!trackingAvailable) {
+      fallbackIndices.push(index);
+      continue;
+    }
+
+    const candidate = candidates[index];
     try {
-      const guesses = await guessCandidateStatsBatch(batch, roster);
-      for (const guess of guesses) {
-        const player = guess.jerseyNumber
-          ? roster.find(
-              (p) => p.jerseyNumber.trim().toLowerCase() === guess.jerseyNumber!.trim().toLowerCase()
-            )
-          : undefined;
-        results[guess.candidateIndex] = {
-          jerseyNumber: guess.jerseyNumber,
-          statType: guess.statType,
-          playerId: player?.id ?? null,
-        };
-      }
+      const tracks = await trackCandidate(videoPath, workDir, index, candidate.videoTimestampSeconds);
+      const guess = await guessCandidateFromTracks(
+        { previousScoreText: candidate.previousScoreText, scoreText: candidate.scoreText },
+        tracks,
+        roster
+      );
+      results[index] = {
+        jerseyNumber: guess.jerseyNumber,
+        statType: guess.statType,
+        playerId: resolvePlayerId(guess.jerseyNumber, roster),
+      };
     } catch (err) {
-      console.error("guessCandidateStatsBatch failed for a batch:", err);
+      console.error(
+        `Tracking-based guess failed (candidate ${index}) — falling back to wide-frame guessing for remaining candidates:`,
+        err
+      );
+      trackingAvailable = false;
+      fallbackIndices.push(index);
+    }
+  }
+
+  if (fallbackIndices.length > 0) {
+    const toGuess: CandidateToGuess[] = fallbackIndices.map((index) => {
+      const c = candidates[index];
+      const centerIndex = Math.round(c.videoTimestampSeconds / FRAME_INTERVAL_SECONDS);
+      const frameIndices = [centerIndex - 1, centerIndex, centerIndex + 1].filter(
+        (i, idx, arr) => i >= 0 && i < frameFiles.length && arr.indexOf(i) === idx
+      );
+      return {
+        index,
+        previousScoreText: c.previousScoreText,
+        scoreText: c.scoreText,
+        frames: frameIndices.map((i) => ({
+          path: path.join(framesDir, frameFiles[i]),
+          timestampSeconds: i * FRAME_INTERVAL_SECONDS,
+        })),
+      };
+    });
+
+    for (let i = 0; i < toGuess.length; i += CANDIDATES_PER_GUESS_CALL) {
+      const batch = toGuess.slice(i, i + CANDIDATES_PER_GUESS_CALL);
+      try {
+        const guesses = await guessCandidateStatsBatch(batch, roster);
+        for (const guess of guesses) {
+          results[guess.candidateIndex] = {
+            jerseyNumber: guess.jerseyNumber,
+            statType: guess.statType,
+            playerId: resolvePlayerId(guess.jerseyNumber, roster),
+          };
+        }
+      } catch (err) {
+        console.error("guessCandidateStatsBatch failed for a batch:", err);
+      }
     }
   }
 
@@ -177,6 +281,8 @@ export async function runVideoAnalysisJob(jobId: string, youtubeVideoId: string)
       await updateJob(jobId, { status: "MATCHING", progress: 96 });
       const guesses = await guessCandidatePlayers(
         candidates,
+        videoPath,
+        workDir,
         framesDir,
         frameFiles,
         roster
