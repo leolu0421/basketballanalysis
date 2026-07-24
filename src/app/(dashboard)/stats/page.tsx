@@ -9,6 +9,7 @@ import {
 import { ShotCourt } from "@/components/shot-court";
 import { isShotType } from "@/lib/stat-types";
 import { MatchSelector } from "@/components/match-selector";
+import { ReferenceCheck } from "./reference-check";
 
 function fmtPct(n: number) {
   return `${n.toFixed(1)}%`;
@@ -44,9 +45,10 @@ export default async function StatsPage({
 
   const activeMatch = matches.find((m) => m.id === matchId) ?? matches[0];
 
-  const [players, events] = await Promise.all([
+  const [players, events, referenceStats] = await Promise.all([
     prisma.player.findMany({ where: { teamId: team.id }, orderBy: { jerseyNumber: "asc" } }),
     prisma.statEvent.findMany({ where: { matchId: activeMatch.id } }),
+    prisma.referenceStatLine.findMany({ where: { matchId: activeMatch.id } }),
   ]);
 
   const boxByPlayer = computeBoxScoreByPlayer(events);
@@ -170,6 +172,7 @@ export default async function StatsPage({
       )}
 
       {tab === "player" && (
+        <>
         <div className="mt-6 overflow-x-auto rounded-xl border border-black/5 bg-white">
           <table className="w-full text-sm">
             <thead>
@@ -264,6 +267,25 @@ export default async function StatsPage({
             </tbody>
           </table>
         </div>
+
+        <ReferenceCheck
+          matchId={activeMatch.id}
+          players={players}
+          loggedByPlayer={Object.fromEntries(
+            players.map((p) => {
+              const l = boxByPlayer[p.id] ?? emptyBoxScoreLine(p.id);
+              return [p.id, { fg2m: l.fg2m, fg3m: l.fg3m, ftm: l.ftm, pf: l.pf }];
+            })
+          )}
+          initialReference={referenceStats.map((r) => ({
+            playerId: r.playerId,
+            fg2Made: r.fg2Made,
+            fg3Made: r.fg3Made,
+            ftMade: r.ftMade,
+            fouls: r.fouls,
+          }))}
+        />
+        </>
       )}
     </div>
   );

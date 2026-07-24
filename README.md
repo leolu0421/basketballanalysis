@@ -161,6 +161,27 @@ host like a VPS, Railway, Fly.io, or a Docker deployment with those
 binaries installed, or moving this specific job to a dedicated background
 worker/queue if deployed alongside a serverless frontend.
 
+**Reference stats check:** on the Stats page's Player Stats tab, coaches
+can optionally type in per-player 2PT/3PT/FT-made and foul counts from
+an outside source (e.g. a paper stat sheet or another app like MyHoops)
+for that game. Logged values are compared live and flagged (⚠️) on
+mismatch. This is a manual cross-check, not a training signal — it
+doesn't change how future AI suggestions are generated (see the "Can
+this AI learn from provided stats?" note below).
+
+**Can this AI learn from provided stats?** No — each vision call is
+independent with no memory across games, and Claude isn't
+fine-tuned/retrained from data entered into this app. Real accuracy
+improvement would require a fundamentally different, much larger build:
+a labeled dataset (bounding boxes, jersey numbers, event timestamps
+across many hours of footage), a dedicated multi-object tracking model
+to hold a persistent per-player identity across the video, and a trained
+action-recognition model for event classification — the kind of system
+dedicated sports-analytics companies build with multi-camera rigs, not
+something addable to this codebase. The reference-stats check above is
+the practical alternative: it doesn't make the AI smarter, but it makes
+inaccuracies visible so a coach can catch and fix them per game.
+
 **What's untested:** the download step (`yt-dlp` → `ffmpeg` → Claude
 vision) could not be exercised end-to-end during development — the dev
 sandbox's network policy blocks outbound requests to youtube.com. Verified
