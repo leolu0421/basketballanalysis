@@ -29,17 +29,24 @@ export async function signupAction(
 
   const { name, email, password } = parsed.data;
 
-  const existing = await prisma.user.findUnique({ where: { email } });
-  if (existing) {
-    return { error: "An account with that email already exists" };
+  let userId: string;
+  try {
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      return { error: "An account with that email already exists" };
+    }
+
+    const passwordHash = await hashPassword(password);
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash },
+    });
+    userId = user.id;
+  } catch (err) {
+    console.error("signupAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
   }
 
-  const passwordHash = await hashPassword(password);
-  const user = await prisma.user.create({
-    data: { name, email, passwordHash },
-  });
-
-  await createSession(user.id);
+  await createSession(userId);
   redirect("/teams/new");
 }
 
@@ -62,12 +69,20 @@ export async function loginAction(
   }
 
   const { email, password } = parsed.data;
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !(await verifyPassword(password, user.passwordHash))) {
-    return { error: "Invalid email or password" };
+
+  let userId: string;
+  try {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+      return { error: "Invalid email or password" };
+    }
+    userId = user.id;
+  } catch (err) {
+    console.error("loginAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
   }
 
-  await createSession(user.id);
+  await createSession(userId);
   redirect("/matches");
 }
 

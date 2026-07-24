@@ -6,12 +6,16 @@ export async function getCurrentUser() {
   const userId = await getSessionUserId();
   if (!userId) return null;
 
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    include: { teams: { orderBy: { createdAt: "asc" } } },
-  });
-
-  return user;
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { teams: { orderBy: { createdAt: "asc" } } },
+    });
+    return user;
+  } catch (err) {
+    console.error("getCurrentUser failed:", err);
+    return null;
+  }
 }
 
 export async function requireUser() {
