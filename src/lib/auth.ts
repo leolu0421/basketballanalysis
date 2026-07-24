@@ -4,12 +4,15 @@ import bcrypt from "bcryptjs";
 
 const SESSION_COOKIE = "session";
 
-if (!process.env.AUTH_SECRET) {
-  throw new Error(
-    "AUTH_SECRET environment variable is not set (or is empty). Set it to a long random string."
-  );
+function getSecret() {
+  const value = process.env.AUTH_SECRET;
+  if (!value) {
+    throw new Error(
+      "AUTH_SECRET environment variable is not set (or is empty). Set it to a long random string."
+    );
+  }
+  return new TextEncoder().encode(value);
 }
-const secret = new TextEncoder().encode(process.env.AUTH_SECRET);
 
 export async function hashPassword(password: string) {
   return bcrypt.hash(password, 10);
@@ -24,7 +27,7 @@ export async function createSession(userId: string) {
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("30d")
-    .sign(secret);
+    .sign(getSecret());
 
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE, token, {
@@ -47,7 +50,7 @@ export async function getSessionUserId(): Promise<string | null> {
   if (!token) return null;
 
   try {
-    const { payload } = await jwtVerify(token, secret);
+    const { payload } = await jwtVerify(token, getSecret());
     return (payload.userId as string) ?? null;
   } catch {
     return null;
