@@ -1,7 +1,7 @@
 import { requireTeam } from "@/lib/current-user";
 import { prisma } from "@/lib/prisma";
-import { deletePlayerAction } from "@/lib/actions/team-actions";
 import { AddPlayerForm } from "./add-player-form";
+import { EditPlayerRow } from "./edit-player-row";
 
 export default async function PlayersPage() {
   const { team } = await requireTeam();
@@ -43,23 +43,7 @@ export default async function PlayersPage() {
           </thead>
           <tbody>
             {players.map((p) => (
-              <tr key={p.id} className="border-b border-black/5 last:border-0">
-                <td className="px-4 py-3 font-semibold">#{p.jerseyNumber}</td>
-                <td className="px-4 py-3">{p.firstName}</td>
-                <td className="px-4 py-3">{p.lastName}</td>
-                <td className="px-4 py-3 text-black/60">{p.email ?? "—"}</td>
-                <td className="px-4 py-3 text-black/60">{p._count.statEvents}</td>
-                <td className="px-4 py-3 text-right">
-                  <form action={deletePlayerAction.bind(null, p.id)}>
-                    <button
-                      type="submit"
-                      className="text-xs font-medium text-red-500 hover:underline"
-                    >
-                      Remove
-                    </button>
-                  </form>
-                </td>
-              </tr>
+              <EditPlayerRow key={p.id} player={p} />
             ))}
             {players.length === 0 && (
               <tr>

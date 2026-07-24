@@ -100,6 +100,42 @@ export async function addPlayerAction(
   return undefined;
 }
 
+export async function updatePlayerAction(
+  playerId: string,
+  _prevState: TeamActionState,
+  formData: FormData
+): Promise<TeamActionState> {
+  const { team } = await requireTeam();
+
+  const parsed = playerSchema.safeParse({
+    firstName: formData.get("firstName"),
+    lastName: formData.get("lastName"),
+    jerseyNumber: formData.get("jerseyNumber"),
+    email: formData.get("email") || "",
+  });
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
+  }
+
+  try {
+    await prisma.player.updateMany({
+      where: { id: playerId, teamId: team.id },
+      data: {
+        firstName: parsed.data.firstName,
+        lastName: parsed.data.lastName,
+        jerseyNumber: parsed.data.jerseyNumber,
+        email: parsed.data.email || null,
+      },
+    });
+  } catch (err) {
+    console.error("updatePlayerAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
+  }
+
+  revalidatePath("/players");
+  return undefined;
+}
+
 export async function deletePlayerAction(playerId: string) {
   const { team } = await requireTeam();
   try {
