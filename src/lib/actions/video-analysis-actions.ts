@@ -17,17 +17,26 @@ export async function startVideoAnalysisAction(
     return { error: "AI isn't configured yet — set ANTHROPIC_API_KEY." };
   }
 
-  const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
-  if (!match) return { error: "Match not found" };
-  if (!match.youtubeVideoId) return { error: "This match has no linked YouTube video." };
+  let jobId: string;
+  let youtubeVideoId: string;
+  try {
+    const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
+    if (!match) return { error: "Match not found" };
+    if (!match.youtubeVideoId) return { error: "This match has no linked YouTube video." };
+    youtubeVideoId = match.youtubeVideoId;
 
-  const job = await prisma.videoAnalysisJob.create({
-    data: { matchId, status: "PENDING" },
-  });
+    const job = await prisma.videoAnalysisJob.create({
+      data: { matchId, status: "PENDING" },
+    });
+    jobId = job.id;
+  } catch (err) {
+    console.error("startVideoAnalysisAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
+  }
 
   // Fire-and-forget: the pipeline runs in the background and updates the job
   // row as it progresses. It handles its own errors internally.
-  void runVideoAnalysisJob(job.id, match.youtubeVideoId);
+  void runVideoAnalysisJob(jobId, youtubeVideoId);
 
   revalidatePath(`/matches/${matchId}`);
   return undefined;

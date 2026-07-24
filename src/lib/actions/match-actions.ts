@@ -39,17 +39,24 @@ export async function createMatchAction(
     }
   }
 
-  const match = await prisma.match.create({
-    data: {
-      teamId: team.id,
-      opponentName: parsed.data.opponentName,
-      date: new Date(parsed.data.date),
-      youtubeVideoId,
-    },
-  });
+  let matchId: string;
+  try {
+    const match = await prisma.match.create({
+      data: {
+        teamId: team.id,
+        opponentName: parsed.data.opponentName,
+        date: new Date(parsed.data.date),
+        youtubeVideoId,
+      },
+    });
+    matchId = match.id;
+  } catch (err) {
+    console.error("createMatchAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
+  }
 
   revalidatePath("/matches");
-  redirect(`/matches/${match.id}`);
+  redirect(`/matches/${matchId}`);
 }
 
 export async function deleteMatchAction(matchId: string) {
@@ -78,10 +85,15 @@ export async function updateMatchScoreAction(
     return { error: "Enter valid scores" };
   }
 
-  await prisma.match.updateMany({
-    where: { id: matchId, teamId: team.id },
-    data: parsed.data,
-  });
+  try {
+    await prisma.match.updateMany({
+      where: { id: matchId, teamId: team.id },
+      data: parsed.data,
+    });
+  } catch (err) {
+    console.error("updateMatchScoreAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
+  }
   revalidatePath(`/matches/${matchId}`);
   return undefined;
 }

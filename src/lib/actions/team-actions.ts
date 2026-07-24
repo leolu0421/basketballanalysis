@@ -37,18 +37,23 @@ export async function createTeamAction(
   }
 
   let joinCode = randomJoinCode();
-  while (await prisma.team.findUnique({ where: { joinCode } })) {
-    joinCode = randomJoinCode();
-  }
+  try {
+    while (await prisma.team.findUnique({ where: { joinCode } })) {
+      joinCode = randomJoinCode();
+    }
 
-  await prisma.team.create({
-    data: {
-      name: parsed.data.name,
-      division: parsed.data.division,
-      joinCode,
-      ownerId: user.id,
-    },
-  });
+    await prisma.team.create({
+      data: {
+        name: parsed.data.name,
+        division: parsed.data.division,
+        joinCode,
+        ownerId: user.id,
+      },
+    });
+  } catch (err) {
+    console.error("createTeamAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
+  }
 
   redirect("/matches");
 }
@@ -76,15 +81,20 @@ export async function addPlayerAction(
     return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
   }
 
-  await prisma.player.create({
-    data: {
-      teamId: team.id,
-      firstName: parsed.data.firstName,
-      lastName: parsed.data.lastName,
-      jerseyNumber: parsed.data.jerseyNumber,
-      email: parsed.data.email || null,
-    },
-  });
+  try {
+    await prisma.player.create({
+      data: {
+        teamId: team.id,
+        firstName: parsed.data.firstName,
+        lastName: parsed.data.lastName,
+        jerseyNumber: parsed.data.jerseyNumber,
+        email: parsed.data.email || null,
+      },
+    });
+  } catch (err) {
+    console.error("addPlayerAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
+  }
 
   revalidatePath("/players");
   return undefined;
@@ -92,6 +102,11 @@ export async function addPlayerAction(
 
 export async function deletePlayerAction(playerId: string) {
   const { team } = await requireTeam();
-  await prisma.player.deleteMany({ where: { id: playerId, teamId: team.id } });
+  try {
+    await prisma.player.deleteMany({ where: { id: playerId, teamId: team.id } });
+  } catch (err) {
+    console.error("deletePlayerAction failed:", err);
+    return;
+  }
   revalidatePath("/players");
 }
