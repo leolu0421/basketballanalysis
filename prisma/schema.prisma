@@ -97,6 +97,9 @@ model VideoAnalysisCandidate {
   videoTimestampSeconds Float
   previousScoreText     String?
   scoreText             String?
+  guessedJerseyNumber   String?
+  guessedStatType       String?
+  guessedPlayerId       String?
   dismissed             Boolean          @default(false)
   createdAt             DateTime         @default(now())
 }

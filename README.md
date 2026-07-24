@@ -109,16 +109,38 @@ real reset email arrives once deployed.
 ## Video analysis ("Suggested moments")
 
 Full automatic box-score generation from video isn't something an LLM
-vision API can reliably do — individual plays happen in ~1-2 seconds and
+vision API can reliably do — individual plays happen in ~1-2 seconds,
 sampled frames can't reliably distinguish players by jersey number at
-typical game-footage resolution. What's implemented instead is **assisted
-tagging**: on a match's page, "Analyze video" downloads the linked YouTube
-video server-side, samples a frame every 15 seconds, and asks Claude
-(vision, structured outputs) to transcribe the on-screen scoreboard in
-each frame. Consecutive readings are diffed into candidate events (e.g.
-"12:34 — 42-38 → 44-38"), listed under Suggested Moments so a coach can
-jump the video to that moment and tag the correct player instead of
-scrubbing the whole game.
+typical game-footage resolution, and there's no persistent player
+tracking (no ReID/motion-tracking model) across the video — each vision
+call only reasons over the handful of frames it's given. What's
+implemented instead is **assisted tagging**: on a match's page, "Analyze
+video" downloads the linked YouTube video server-side, samples a frame
+every 15 seconds, and asks Claude (vision, structured outputs) to
+transcribe the on-screen scoreboard in each frame. Consecutive readings
+are diffed into candidate scoring moments (e.g. "12:34 — 42-38 → 44-38").
+
+For each candidate, a second vision pass looks at the short frame
+sequence around that moment plus the team roster and guesses **who
+scored and what kind of shot it was** (2PT/3PT/FT made — candidates only
+exist where the score went up, so misses aren't covered). The guess uses
+jersey number, jersey color, ball possession, court position, and
+relative build across the frame sequence as corroborating cues, and the
+shot-type guess leans on the scoreboard point delta (a jump of exactly 3
+is a three, exactly 1 is a free throw) rather than judging shot arc
+visually — that part is arithmetic, not vision. Free throws are the most
+reliable guess since the scene (stoppage, isolated shooter at the line)
+is visually distinct; the weakest link is telling a 2PT jumper from a
+3PT jumper purely by foot position relative to the arc on blurry
+single-angle footage.
+
+Suggestions are shown under "Suggested moments" as **AI guess: #2 Harper
+— 2PT Made** with Confirm / Edit / Dismiss — clicking the timestamp
+seeks the video to that clip so the coach can watch it before deciding.
+Nothing is ever logged as a real stat without an explicit Confirm; if the
+guess is missing or wrong, the coach picks the player and stat type from
+a dropdown instead. The full manual tagging buttons remain available
+alongside this for anything the suggestions don't cover.
 
 **How the video gets downloaded, and why:** the app only stores a
 `youtubeVideoId`, not the video file — embedding for playback works fine,
@@ -143,8 +165,12 @@ worker/queue if deployed alongside a serverless frontend.
 vision) could not be exercised end-to-end during development — the dev
 sandbox's network policy blocks outbound requests to youtube.com. Verified
 instead: the job status state machine (PENDING → DOWNLOADING → EXTRACTING
-→ ANALYZING → DONE/FAILED), progress polling, error surfacing (confirmed
-against a real `yt-dlp` failure), the score-candidate diffing logic (unit
-tested), and the full UI. **Confirm the download + vision-analysis steps
-actually produce sane candidates against a real game video once
-deployed somewhere with normal internet access.**
+→ ANALYZING → MATCHING → DONE/FAILED), progress polling, error surfacing
+(confirmed against a real `yt-dlp` failure), the score-candidate diffing
+logic (unit tested), and the full UI including the confirm/edit/dismiss
+flow. **Confirm the download + vision-analysis steps actually produce
+sane candidates — and reasonable player/shot-type guesses — against a
+real game video once deployed somewhere with normal internet access.**
+The player-guessing pass fails gracefully (candidates still show up with
+no guess, just an empty player/stat picker) if that second vision call
+errors, so a bad guess-pass run shouldn't block tagging entirely.

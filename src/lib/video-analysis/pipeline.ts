@@ -3,11 +3,12 @@ import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
-import { readScoreboardBatch, type FrameRead } from "./vision";
-import { buildScoreCandidates } from "./candidates";
+import { readScoreboardBatch, guessCandidateStatsBatch, type FrameRead, type CandidateToGuess } from "./vision";
+import { buildScoreCandidates, type ScoreCandidate } from "./candidates";
 
 const FRAME_INTERVAL_SECONDS = 15;
 const FRAMES_PER_VISION_CALL = 10;
+const CANDIDATES_PER_GUESS_CALL = 4;
 
 function run(cmd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -33,6 +34,65 @@ async function updateJob(
   await prisma.videoAnalysisJob.update({ where: { id: jobId }, data });
 }
 
+type RosterPlayer = { id: string; jerseyNumber: string; firstName: string; lastName: string };
+type CandidateGuessResult = { jerseyNumber: string | null; statType: string | null; playerId: string | null };
+
+/**
+ * For each score-change candidate, grabs the short frame sequence around its
+ * timestamp and asks Claude vision to guess the scoring player + shot type.
+ * Best-effort: a failed batch just leaves those candidates unguessed rather
+ * than failing the whole job, since the scoreboard candidates are still
+ * useful on their own.
+ */
+async function guessCandidatePlayers(
+  candidates: ScoreCandidate[],
+  framesDir: string,
+  frameFiles: string[],
+  roster: RosterPlayer[]
+): Promise<Array<CandidateGuessResult | undefined>> {
+  const results: Array<CandidateGuessResult | undefined> = new Array(candidates.length).fill(undefined);
+  if (roster.length === 0) return results;
+
+  const toGuess: CandidateToGuess[] = candidates.map((c, index) => {
+    const centerIndex = Math.round(c.videoTimestampSeconds / FRAME_INTERVAL_SECONDS);
+    const frameIndices = [centerIndex - 1, centerIndex, centerIndex + 1].filter(
+      (i, idx, arr) => i >= 0 && i < frameFiles.length && arr.indexOf(i) === idx
+    );
+    return {
+      index,
+      previousScoreText: c.previousScoreText,
+      scoreText: c.scoreText,
+      frames: frameIndices.map((i) => ({
+        path: path.join(framesDir, frameFiles[i]),
+        timestampSeconds: i * FRAME_INTERVAL_SECONDS,
+      })),
+    };
+  });
+
+  for (let i = 0; i < toGuess.length; i += CANDIDATES_PER_GUESS_CALL) {
+    const batch = toGuess.slice(i, i + CANDIDATES_PER_GUESS_CALL);
+    try {
+      const guesses = await guessCandidateStatsBatch(batch, roster);
+      for (const guess of guesses) {
+        const player = guess.jerseyNumber
+          ? roster.find(
+              (p) => p.jerseyNumber.trim().toLowerCase() === guess.jerseyNumber!.trim().toLowerCase()
+            )
+          : undefined;
+        results[guess.candidateIndex] = {
+          jerseyNumber: guess.jerseyNumber,
+          statType: guess.statType,
+          playerId: player?.id ?? null,
+        };
+      }
+    } catch (err) {
+      console.error("guessCandidateStatsBatch failed for a batch:", err);
+    }
+  }
+
+  return results;
+}
+
 /**
  * Downloads the linked YouTube video, samples frames at a fixed interval,
  * reads the on-screen scoreboard in each via Claude vision, and stores a
@@ -46,6 +106,17 @@ export async function runVideoAnalysisJob(jobId: string, youtubeVideoId: string)
   const workDir = await mkdtemp(path.join(os.tmpdir(), "video-analysis-"));
 
   try {
+    const job = await prisma.videoAnalysisJob.findUniqueOrThrow({
+      where: { id: jobId },
+      include: { match: { include: { team: { include: { players: true } } } } },
+    });
+    const roster = job.match.team.players.map((p) => ({
+      id: p.id,
+      jerseyNumber: p.jerseyNumber,
+      firstName: p.firstName,
+      lastName: p.lastName,
+    }));
+
     await updateJob(jobId, { status: "DOWNLOADING", progress: 5 });
 
     await run("yt-dlp", [
@@ -101,9 +172,24 @@ export async function runVideoAnalysisJob(jobId: string, youtubeVideoId: string)
     }
 
     const candidates = buildScoreCandidates(allReads, FRAME_INTERVAL_SECONDS);
+
     if (candidates.length > 0) {
+      await updateJob(jobId, { status: "MATCHING", progress: 96 });
+      const guesses = await guessCandidatePlayers(
+        candidates,
+        framesDir,
+        frameFiles,
+        roster
+      );
+
       await prisma.videoAnalysisCandidate.createMany({
-        data: candidates.map((c) => ({ jobId, ...c })),
+        data: candidates.map((c, i) => ({
+          jobId,
+          ...c,
+          guessedJerseyNumber: guesses[i]?.jerseyNumber ?? null,
+          guessedStatType: guesses[i]?.statType ?? null,
+          guessedPlayerId: guesses[i]?.playerId ?? null,
+        })),
       });
     }
 

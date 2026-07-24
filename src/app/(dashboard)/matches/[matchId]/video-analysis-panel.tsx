@@ -5,13 +5,22 @@ import {
   startVideoAnalysisAction,
   getVideoAnalysisStatus,
   dismissCandidateAction,
+  confirmCandidateAction,
 } from "@/lib/actions/video-analysis-actions";
+import { STAT_LABELS, type StatType } from "@/lib/stat-types";
+
+const MADE_TYPES: StatType[] = ["FG2_MADE", "FG3_MADE", "FT_MADE"];
+
+type Player = { id: string; firstName: string; lastName: string; jerseyNumber: string };
 
 type Candidate = {
   id: string;
   videoTimestampSeconds: number;
   previousScoreText: string | null;
   scoreText: string | null;
+  guessedJerseyNumber: string | null;
+  guessedStatType: string | null;
+  guessedPlayerId: string | null;
 };
 
 type Job = {
@@ -22,13 +31,14 @@ type Job = {
   candidates: Candidate[];
 } | null;
 
-const ACTIVE_STATUSES = ["PENDING", "DOWNLOADING", "EXTRACTING", "ANALYZING"];
+const ACTIVE_STATUSES = ["PENDING", "DOWNLOADING", "EXTRACTING", "ANALYZING", "MATCHING"];
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "Queued…",
   DOWNLOADING: "Downloading video…",
   EXTRACTING: "Extracting frames…",
   ANALYZING: "Reading scoreboard…",
+  MATCHING: "Guessing players…",
   DONE: "Done",
   FAILED: "Failed",
 };
@@ -39,15 +49,165 @@ function formatTime(seconds: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function CandidateRow({
+  candidate,
+  players,
+  quarter,
+  matchId,
+  onSeek,
+  onResolved,
+}: {
+  candidate: Candidate;
+  players: Player[];
+  quarter: number;
+  matchId: string;
+  onSeek: (seconds: number) => void;
+  onResolved: (candidateId: string) => void;
+}) {
+  const guessedPlayer = candidate.guessedPlayerId
+    ? players.find((p) => p.id === candidate.guessedPlayerId) ?? null
+    : null;
+  const guessedType = MADE_TYPES.includes(candidate.guessedStatType as StatType)
+    ? (candidate.guessedStatType as StatType)
+    : null;
+
+  const [editing, setEditing] = useState(!guessedPlayer || !guessedType);
+  const [playerId, setPlayerId] = useState(candidate.guessedPlayerId ?? "");
+  const [statType, setStatType] = useState<StatType | "">(guessedType ?? "");
+  const [isPending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  function handleConfirm() {
+    if (!playerId || !statType) return;
+    setError(null);
+    startTransition(async () => {
+      const result = await confirmCandidateAction(candidate.id, matchId, {
+        playerId,
+        type: statType,
+        quarter,
+      });
+      if (result?.error) {
+        setError(result.error);
+      } else {
+        onResolved(candidate.id);
+      }
+    });
+  }
+
+  function handleDismiss() {
+    onResolved(candidate.id);
+    startTransition(() => dismissCandidateAction(candidate.id, matchId));
+  }
+
+  return (
+    <li className="rounded-lg bg-black/5 px-2 py-2 text-sm">
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => onSeek(candidate.videoTimestampSeconds)}
+          className="text-left font-medium text-navy hover:underline"
+        >
+          {formatTime(candidate.videoTimestampSeconds)} — {candidate.previousScoreText ?? "?"} →{" "}
+          {candidate.scoreText ?? "?"}
+        </button>
+        <button onClick={handleDismiss} className="text-xs text-black/40 hover:text-black/70">
+          Dismiss
+        </button>
+      </div>
+
+      {!editing ? (
+        <div className="mt-1.5 flex items-center justify-between gap-2">
+          <p className="text-xs text-black/60">
+            AI guess:{" "}
+            <span className="font-medium text-navy">
+              #{guessedPlayer?.jerseyNumber} {guessedPlayer?.firstName}
+            </span>{" "}
+            — {STAT_LABELS[guessedType as StatType]}
+          </p>
+          <div className="flex shrink-0 gap-2">
+            <button
+              onClick={() => setEditing(true)}
+              className="text-xs font-medium text-navy hover:underline"
+            >
+              Edit
+            </button>
+            <button
+              onClick={handleConfirm}
+              disabled={isPending}
+              className="rounded-md bg-navy px-2 py-1 text-xs font-semibold text-white disabled:opacity-60"
+            >
+              {isPending ? "Saving…" : "Confirm"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-2 space-y-1.5">
+          {(!guessedPlayer || !guessedType) && (
+            <p className="text-xs text-black/40">
+              Watch the clip above, then pick who scored and what it was.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-1.5">
+            <select
+              value={playerId}
+              onChange={(e) => setPlayerId(e.target.value)}
+              className="rounded-md border border-black/10 bg-white px-2 py-1 text-xs outline-none focus:border-brand"
+            >
+              <option value="">Player…</option>
+              {players.map((p) => (
+                <option key={p.id} value={p.id}>
+                  #{p.jerseyNumber} {p.firstName} {p.lastName}
+                </option>
+              ))}
+            </select>
+            <select
+              value={statType}
+              onChange={(e) => setStatType(e.target.value as StatType)}
+              className="rounded-md border border-black/10 bg-white px-2 py-1 text-xs outline-none focus:border-brand"
+            >
+              <option value="">Stat…</option>
+              {MADE_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {STAT_LABELS[t]}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={handleConfirm}
+              disabled={isPending || !playerId || !statType}
+              className="rounded-md bg-navy px-2 py-1 text-xs font-semibold text-white disabled:opacity-40"
+            >
+              {isPending ? "Saving…" : "Confirm"}
+            </button>
+            {guessedPlayer && guessedType && (
+              <button
+                onClick={() => setEditing(false)}
+                className="text-xs text-black/40 hover:text-black/70"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+    </li>
+  );
+}
+
 export function VideoAnalysisPanel({
   matchId,
   hasVideo,
   initialJob,
+  players,
+  quarter,
   onSeek,
 }: {
   matchId: string;
   hasVideo: boolean;
   initialJob: Job;
+  players: Player[];
+  quarter: number;
   onSeek: (seconds: number) => void;
 }) {
   const [job, setJob] = useState<Job>(initialJob);
@@ -83,11 +243,10 @@ export function VideoAnalysisPanel({
     });
   }
 
-  function handleDismiss(candidateId: string) {
+  function handleResolved(candidateId: string) {
     setJob((prev) =>
       prev ? { ...prev, candidates: prev.candidates.filter((c) => c.id !== candidateId) } : prev
     );
-    startTransition(() => dismissCandidateAction(candidateId, matchId));
   }
 
   if (!hasVideo) return null;
@@ -132,28 +291,25 @@ export function VideoAnalysisPanel({
       )}
 
       {job && job.candidates.length > 0 && (
-        <ul className="mt-3 space-y-1.5">
-          {job.candidates.map((c) => (
-            <li
-              key={c.id}
-              className="flex items-center justify-between rounded-lg bg-black/5 px-2 py-1.5 text-sm"
-            >
-              <button
-                onClick={() => onSeek(c.videoTimestampSeconds)}
-                className="text-left text-navy hover:underline"
-              >
-                {formatTime(c.videoTimestampSeconds)} — {c.previousScoreText ?? "?"} →{" "}
-                {c.scoreText ?? "?"}
-              </button>
-              <button
-                onClick={() => handleDismiss(c.id)}
-                className="text-xs text-black/40 hover:text-black/70"
-              >
-                Dismiss
-              </button>
-            </li>
-          ))}
-        </ul>
+        <>
+          <p className="mt-3 text-xs text-black/40">
+            AI-guessed suggestions — watch the clip, then confirm or correct each one. This never
+            logs a stat on its own.
+          </p>
+          <ul className="mt-2 space-y-1.5">
+            {job.candidates.map((c) => (
+              <CandidateRow
+                key={c.id}
+                candidate={c}
+                players={players}
+                quarter={quarter}
+                matchId={matchId}
+                onSeek={onSeek}
+                onResolved={handleResolved}
+              />
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );

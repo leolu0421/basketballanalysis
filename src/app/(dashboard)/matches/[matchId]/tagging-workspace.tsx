@@ -37,6 +37,9 @@ type VideoAnalysisJob = {
     videoTimestampSeconds: number;
     previousScoreText: string | null;
     scoreText: string | null;
+    guessedJerseyNumber: string | null;
+    guessedStatType: string | null;
+    guessedPlayerId: string | null;
   }[];
 } | null;
 
@@ -255,6 +258,8 @@ export function TaggingWorkspace({
           matchId={matchId}
           hasVideo={Boolean(youtubeVideoId)}
           initialJob={initialVideoJob}
+          players={players}
+          quarter={quarter}
           onSeek={(seconds) => playerRef.current?.seekTo(seconds)}
         />
       </div>

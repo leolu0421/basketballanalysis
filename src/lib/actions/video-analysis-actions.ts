@@ -1,5 +1,6 @@
 "use server";
 
+import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireTeam } from "@/lib/current-user";
@@ -44,27 +45,95 @@ export async function startVideoAnalysisAction(
 
 export async function getVideoAnalysisStatus(matchId: string) {
   const { team } = await requireTeam();
-  const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
-  if (!match) return null;
+  try {
+    const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
+    if (!match) return null;
 
-  const job = await prisma.videoAnalysisJob.findFirst({
-    where: { matchId },
-    orderBy: { createdAt: "desc" },
-    include: { candidates: { where: { dismissed: false }, orderBy: { videoTimestampSeconds: "asc" } } },
-  });
+    const job = await prisma.videoAnalysisJob.findFirst({
+      where: { matchId },
+      orderBy: { createdAt: "desc" },
+      include: { candidates: { where: { dismissed: false }, orderBy: { videoTimestampSeconds: "asc" } } },
+    });
 
-  return job;
+    return job;
+  } catch (err) {
+    console.error("getVideoAnalysisStatus failed:", err);
+    return null;
+  }
 }
 
 export async function dismissCandidateAction(candidateId: string, matchId: string) {
   const { team } = await requireTeam();
-  const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
-  if (!match) throw new Error("Match not found");
+  try {
+    const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
+    if (!match) return;
 
-  await prisma.videoAnalysisCandidate.updateMany({
-    where: { id: candidateId, job: { matchId } },
-    data: { dismissed: true },
-  });
+    await prisma.videoAnalysisCandidate.updateMany({
+      where: { id: candidateId, job: { matchId } },
+      data: { dismissed: true },
+    });
+  } catch (err) {
+    console.error("dismissCandidateAction failed:", err);
+    return;
+  }
 
   revalidatePath(`/matches/${matchId}`);
+}
+
+const confirmSchema = z.object({
+  playerId: z.string().min(1, "Choose a player"),
+  type: z.enum(["FG2_MADE", "FG3_MADE", "FT_MADE"]),
+  quarter: z.coerce.number().int().min(1).max(6),
+});
+
+export async function confirmCandidateAction(
+  candidateId: string,
+  matchId: string,
+  input: { playerId: string; type: string; quarter: number }
+): Promise<VideoAnalysisActionState> {
+  const { team } = await requireTeam();
+
+  const parsed = confirmSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
+  }
+
+  try {
+    const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
+    if (!match) return { error: "Match not found" };
+
+    const player = await prisma.player.findFirst({
+      where: { id: parsed.data.playerId, teamId: team.id },
+    });
+    if (!player) return { error: "Player not found" };
+
+    const candidate = await prisma.videoAnalysisCandidate.findFirst({
+      where: { id: candidateId, job: { matchId } },
+    });
+    if (!candidate) return { error: "Suggestion not found" };
+
+    await prisma.$transaction([
+      prisma.statEvent.create({
+        data: {
+          matchId,
+          playerId: parsed.data.playerId,
+          type: parsed.data.type,
+          quarter: parsed.data.quarter,
+          videoTimestampSeconds: candidate.videoTimestampSeconds,
+        },
+      }),
+      prisma.videoAnalysisCandidate.update({
+        where: { id: candidateId },
+        data: { dismissed: true },
+      }),
+    ]);
+  } catch (err) {
+    console.error("confirmCandidateAction failed:", err);
+    return { error: "Something went wrong. Try again in a moment." };
+  }
+
+  revalidatePath(`/matches/${matchId}`);
+  revalidatePath("/stats");
+  revalidatePath("/performance");
+  return undefined;
 }
