@@ -3,6 +3,12 @@ import { SignJWT, jwtVerify } from "jose";
 import bcrypt from "bcryptjs";
 
 const SESSION_COOKIE = "session";
+
+if (!process.env.AUTH_SECRET) {
+  throw new Error(
+    "AUTH_SECRET environment variable is not set (or is empty). Set it to a long random string."
+  );
+}
 const secret = new TextEncoder().encode(process.env.AUTH_SECRET);
 
 export async function hashPassword(password: string) {
