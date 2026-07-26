@@ -3,9 +3,16 @@
 Fine-tunes a small pretrained image classifier (MobileNetV3-Small) on
 labeled jersey crops produced by extract_training_crops.py + label_crops.py.
 
-This is the "actually trained on your team" piece — unlike the tracking
-pipeline (a generic, off-the-shelf person detector), this model is trained
-specifically on your players' jerseys, colors, and numbers.
+This model learns ONE thing: what digit(s) are painted on a jersey crop.
+Deliberately NOT "which team" or "which player" — team colors are
+different every game (this week's opponent isn't next week's), so a model
+trained to recognize a specific opponent's colors wouldn't generalize past
+that one game. Number-to-player mapping happens separately, live, from
+your team's current roster in the app (already handles roster changes
+season to season on its own — nothing here needs retraining when Harper
+and Zac's teammates change). That's why this only needs one trained model
+that keeps working across seasons and opponents, rather than one you'd
+have to redo constantly.
 
 Usage:
     python3 train_jersey_classifier.py <crops_dir> <output_dir> [--epochs 15]
@@ -28,8 +35,6 @@ from torchvision import transforms, models
 from PIL import Image
 
 UNREADABLE = "UNREADABLE"
-NOT_OUR_TEAM = "NOT_OUR_TEAM"
-OPPONENT_CLASS = "OPPONENT"
 
 
 def load_labeled_examples(crops_dir):
@@ -44,8 +49,7 @@ def load_labeled_examples(crops_dir):
             filename, label = row
             if label == UNREADABLE:
                 continue
-            cls = OPPONENT_CLASS if label == NOT_OUR_TEAM else label
-            examples.append((os.path.join(crops_dir, filename), cls))
+            examples.append((os.path.join(crops_dir, filename), label))
     return examples
 
 

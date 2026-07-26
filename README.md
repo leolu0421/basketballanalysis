@@ -168,20 +168,41 @@ trained on your players' jerseys, there are four scripts for that, and
 they're a real, working pipeline (train + inference tested end-to-end in
 the dev sandbox against synthetic data — see "What's untested" for what
 that does and doesn't prove). This is genuinely a second job for you,
-not something that happens automatically:
+not something that happens automatically.
+
+**Important design choice:** this model only ever learns to read digits
+off a jersey — it is deliberately NOT trained to recognize "your team"
+vs. "the opponent," or any specific player. The reason: an opponent's
+jersey colors are different every single game, and your own roster
+changes every season (different teammates for both Harper and Zac each
+year) — a model trained against this week's specific matchup wouldn't
+transfer to next week, let alone next season, and you'd be stuck
+retraining constantly. Digit recognition, on the other hand, doesn't
+care who's wearing the jersey — a "7" looks like a "7" regardless of
+team or year. The number-to-player mapping (e.g. "#4 is Harper this
+season") is resolved separately, live, from your team's current roster
+in the database every time a video is analyzed — it already handles
+roster changes automatically and was never something you needed to
+train. So label every readable number you see, including opponents' —
+that variety makes the digit-reader more robust, and the same trained
+model keeps working next season and against new opponents without
+retraining, which is the "set it up once" behavior you're after.
 
 1. **`extract_training_crops.py <video> <output_dir>`** — pulls
    individual person crops out of a game video (own footage, any
    source) at a sample rate (`--fps`, default 1/sec), up to
    `--max-crops` (default 500). Run it against a few different games so
-   the crops cover different lighting/angles.
+   the crops cover different lighting/angles/opponents.
 2. **`label_crops.py <crops_dir>`** — starts a local web page
-   (`http://localhost:8765`) showing one crop at a time; type the
-   jersey number and hit save, or mark "can't read it" / "not our team".
-   Labels are written incrementally to `labels.csv` in the crops folder,
-   so you can label 20 crops now and 200 more later — it resumes where
-   you left off. Budget roughly a few dozen to 100+ labeled crops per
-   player for a usable model; more is better.
+   (`http://localhost:8765`) showing one crop at a time; type whatever
+   jersey number is visible and hit save, or mark "can't read it" if it
+   isn't legible. No "which team" question — every readable number
+   counts, teammates and opponents alike. Labels are written
+   incrementally to `labels.csv` in the crops folder, so you can label
+   20 crops now and 200 more later — it resumes where you left off.
+   Budget a few dozen+ labeled examples per distinct number across
+   however many games you run this against; more and more varied is
+   better.
 3. **`train_jersey_classifier.py <crops_dir> <output_dir>`** —
    fine-tunes a small pretrained image classifier (MobileNetV3-Small)
    on your labeled crops (`--epochs`, default 15). Classes with fewer

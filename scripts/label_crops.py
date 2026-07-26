@@ -3,9 +3,19 @@
 Minimal local web UI for labeling jersey-number training crops (no
 dependencies beyond the Python standard library). Run it, open the printed
 URL in a browser, and type the jersey number shown in each image — or mark
-it unreadable / not our team. Labels are appended incrementally to
-labels.csv in the crops directory, so you can stop anytime and resume
-later; already-labeled crops are skipped automatically.
+it unreadable. Labels are appended incrementally to labels.csv in the
+crops directory, so you can stop anytime and resume later; already-labeled
+crops are skipped automatically.
+
+Deliberately no "not our team" option: this model only learns to read
+digits off a jersey, not who's on which team (an opponent's colors are
+different every game, so a model trained to recognize "this color =
+opponent" wouldn't generalize past this one game anyway — see README).
+Label EVERY readable jersey number you see, including opponents' — a 7 is
+a 7 regardless of whose jersey it's on, and that variety makes the model
+read numbers more reliably across different colors and fonts. Which
+number belongs to which of *your* current players is resolved separately,
+live, from your team's roster in the app — not from anything trained here.
 
 Usage:
     python3 label_crops.py <crops_dir> [--port 8765]
@@ -17,7 +27,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
 
 UNREADABLE = "UNREADABLE"
-NOT_OUR_TEAM = "NOT_OUR_TEAM"
 
 PAGE_TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Label jersey crops</title>
@@ -28,6 +37,7 @@ input {{ font-size: 1.5rem; padding: 0.5rem; width: 6rem; text-align: center; }}
 button {{ font-size: 1rem; padding: 0.6rem 1.1rem; margin: 0.3rem; border-radius: 6px; border: none; cursor: pointer; background: #2a5; color: #fff; }}
 button.secondary {{ background: #444; }}
 .progress {{ color: #999; margin-bottom: 1rem; }}
+.hint {{ color: #888; font-size: 0.85rem; max-width: 26rem; margin: 0.5rem auto 0; }}
 </style></head>
 <body>
 <div class="progress">{done} / {total} labeled</div>
@@ -38,7 +48,7 @@ button.secondary {{ background: #444; }}
   <button type="submit">Save &amp; next</button>
   <br><br>
   <button class="secondary" type="submit" name="skip" value="{unreadable}" formnovalidate>Can't read it</button>
-  <button class="secondary" type="submit" name="skip" value="{not_our_team}" formnovalidate>Not our team</button>
+  <p class="hint">Type whatever number is visible, even on an opponent's jersey — this model only learns to read digits, not whose team they're on.</p>
 </form>
 </body></html>"""
 
@@ -90,7 +100,6 @@ class Handler(BaseHTTPRequestHandler):
             done=len(labeled),
             total=len(self.server.crop_files),
             unreadable=UNREADABLE,
-            not_our_team=NOT_OUR_TEAM,
         )
         self.wfile.write(html.encode())
 

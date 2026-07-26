@@ -170,11 +170,15 @@ async function trackCandidate(
  * failing the whole job, since the scoreboard candidates are still useful
  * on their own.
  *
- * If a jersey classifier has been trained on this team's own footage (see
- * scripts/train_jersey_classifier.py), its jersey-number read overrides
- * Claude's when confident — it's trained specifically on these players,
- * where Claude's is a generic OCR read. statType always still comes from
- * Claude, since the classifier only identifies jersey numbers.
+ * If a jersey classifier has been trained (see
+ * scripts/train_jersey_classifier.py — it only ever learns to read digits
+ * off a jersey, deliberately not tied to any specific team/season/roster),
+ * its jersey-number read overrides Claude's when confident. Whether that
+ * number belongs to one of THIS match's current players is then resolved
+ * the same way either path resolves it: a live lookup against the team's
+ * current roster (resolvePlayerId below), not anything from training.
+ * statType always still comes from Claude, since the classifier only
+ * identifies jersey numbers.
  */
 async function guessCandidatePlayers(
   candidates: ScoreCandidate[],
