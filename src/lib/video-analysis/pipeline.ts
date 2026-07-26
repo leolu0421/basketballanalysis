@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, access } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
@@ -19,6 +19,9 @@ const CANDIDATES_PER_GUESS_CALL = 4;
 const TRACK_CLIP_PADDING_SECONDS = 4;
 const TRACK_SAMPLE_FPS = 5;
 const TRACK_SCRIPT_PATH = path.join(process.cwd(), "scripts", "track_players.py");
+const CLASSIFY_SCRIPT_PATH = path.join(process.cwd(), "scripts", "classify_jersey.py");
+const JERSEY_MODEL_DIR = path.join(process.cwd(), "models", "jersey");
+const LOCAL_MODEL_CONFIDENCE_THRESHOLD = 0.6;
 
 function run(cmd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -35,6 +38,57 @@ function run(cmd: string, args: string[]): Promise<void> {
       else reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(-1500)}`));
     });
   });
+}
+
+function runCapture(cmd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args);
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d) => {
+      stderr += d.toString();
+    });
+    child.on("error", (err) => {
+      reject(new Error(`Failed to run ${cmd}: ${err.message}`));
+    });
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(-1500)}`));
+    });
+  });
+}
+
+async function hasTrainedJerseyModel(): Promise<boolean> {
+  try {
+    await access(path.join(JERSEY_MODEL_DIR, "jersey_classifier.pt"));
+    await access(path.join(JERSEY_MODEL_DIR, "jersey_classes.json"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type JerseyPrediction = { crop: string; label: string; confidence: number };
+
+/**
+ * Runs your own trained jersey classifier (scripts/train_jersey_classifier.py
+ * output, see README) on a set of crops. Returns null on any failure —
+ * missing model, bad input, python error — so callers can fall back to the
+ * Claude-vision jersey read without this ever blocking the job.
+ */
+async function classifyCropsLocally(crops: string[]): Promise<JerseyPrediction[] | null> {
+  if (crops.length === 0) return null;
+  try {
+    const stdout = await runCapture("python3", [CLASSIFY_SCRIPT_PATH, JERSEY_MODEL_DIR, ...crops]);
+    const parsed = JSON.parse(stdout) as { predictions?: JerseyPrediction[]; error?: string };
+    return parsed.predictions ?? null;
+  } catch (err) {
+    console.error("classifyCropsLocally failed:", err);
+    return null;
+  }
 }
 
 async function updateJob(
@@ -115,6 +169,12 @@ async function trackCandidate(
  * throughout: a failure just leaves a candidate unguessed rather than
  * failing the whole job, since the scoreboard candidates are still useful
  * on their own.
+ *
+ * If a jersey classifier has been trained on this team's own footage (see
+ * scripts/train_jersey_classifier.py), its jersey-number read overrides
+ * Claude's when confident — it's trained specifically on these players,
+ * where Claude's is a generic OCR read. statType always still comes from
+ * Claude, since the classifier only identifies jersey numbers.
  */
 async function guessCandidatePlayers(
   candidates: ScoreCandidate[],
@@ -126,6 +186,8 @@ async function guessCandidatePlayers(
 ): Promise<Array<CandidateGuessResult | undefined>> {
   const results: Array<CandidateGuessResult | undefined> = new Array(candidates.length).fill(undefined);
   if (roster.length === 0) return results;
+
+  const useLocalModel = await hasTrainedJerseyModel();
 
   let trackingAvailable = true;
   const fallbackIndices: number[] = [];
@@ -144,10 +206,22 @@ async function guessCandidatePlayers(
         tracks,
         roster
       );
+
+      let jerseyNumber = guess.jerseyNumber;
+      if (useLocalModel) {
+        const allCrops = tracks.flatMap((t) => t.crops);
+        const predictions = await classifyCropsLocally(allCrops);
+        const best = predictions
+          ?.filter((p) => p.confidence >= LOCAL_MODEL_CONFIDENCE_THRESHOLD)
+          .filter((p) => resolvePlayerId(p.label, roster) !== null)
+          .sort((a, b) => b.confidence - a.confidence)[0];
+        if (best) jerseyNumber = best.label;
+      }
+
       results[index] = {
-        jerseyNumber: guess.jerseyNumber,
+        jerseyNumber,
         statType: guess.statType,
-        playerId: resolvePlayerId(guess.jerseyNumber, roster),
+        playerId: resolvePlayerId(jerseyNumber, roster),
       };
     } catch (err) {
       console.error(

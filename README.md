@@ -161,13 +161,46 @@ throws are the most reliable guess since the scene (stoppage, isolated
 shooter at the line) is visually distinct; the weakest link is telling a
 2PT jumper from a 3PT jumper purely by position relative to the arc.
 
-**Can this become a model trained specifically on your team?** That's a
-materially bigger, separate project — see the "Can this AI learn from
-provided stats?" note further down for what that would actually take
-(a labeled dataset, a trained jersey-number classifier, GPU training
-infra). What's built here is Phase 1 of that path: real, tested,
-off-the-shelf tracking that improves crop quality today with zero
-training data required — not a shortcut to full custom recognition.
+**Training your own jersey-number model (Phase 2, optional):** the
+tracking step above uses a generic, off-the-shelf person detector —
+nothing in it is trained on your team. If you want a model actually
+trained on your players' jerseys, there are four scripts for that, and
+they're a real, working pipeline (train + inference tested end-to-end in
+the dev sandbox against synthetic data — see "What's untested" for what
+that does and doesn't prove). This is genuinely a second job for you,
+not something that happens automatically:
+
+1. **`extract_training_crops.py <video> <output_dir>`** — pulls
+   individual person crops out of a game video (own footage, any
+   source) at a sample rate (`--fps`, default 1/sec), up to
+   `--max-crops` (default 500). Run it against a few different games so
+   the crops cover different lighting/angles.
+2. **`label_crops.py <crops_dir>`** — starts a local web page
+   (`http://localhost:8765`) showing one crop at a time; type the
+   jersey number and hit save, or mark "can't read it" / "not our team".
+   Labels are written incrementally to `labels.csv` in the crops folder,
+   so you can label 20 crops now and 200 more later — it resumes where
+   you left off. Budget roughly a few dozen to 100+ labeled crops per
+   player for a usable model; more is better.
+3. **`train_jersey_classifier.py <crops_dir> <output_dir>`** —
+   fine-tunes a small pretrained image classifier (MobileNetV3-Small)
+   on your labeled crops (`--epochs`, default 15). Classes with fewer
+   than `--min-per-class` (default 4) labeled examples are dropped
+   automatically rather than poisoning training with too little signal.
+   Prints a JSON summary (classes trained, val accuracy) and writes
+   `jersey_classifier.pt` + `jersey_classes.json`.
+4. **Deploy the model**: copy those two output files into
+   `models/jersey/` at the project root on whatever host runs video
+   analysis. `pipeline.ts` checks for them automatically on each job —
+   if present, the trained classifier's jersey read overrides Claude's
+   whenever it's confident (≥60%) and matches a roster number; if
+   absent, nothing changes from today's behavior. No code changes or
+   redeploys needed beyond dropping the two files in place.
+
+This model only identifies jersey numbers — shot type (2PT/3PT/FT) still
+comes from Claude + the scoreboard delta either way, and there's no
+tooling here for training a shot-type or action classifier (see the
+"Can this AI learn" note below for why that's a much bigger project).
 
 Suggestions are shown under "Suggested moments" as **AI guess: #2 Harper
 — 2PT Made** with Confirm / Edit / Dismiss — clicking the timestamp
@@ -217,16 +250,17 @@ detector + tracker (YOLOv8 + ByteTrack, trained on generic COCO photos,
 not on your team) that holds a per-clip identity for whoever's on
 screen and crops them for a better OCR read — that's real tracking, but
 it doesn't know your specific players or "learn" anything from your
-data; it just finds "a person" generically. Going further — a model
-that's actually trained to recognize your team's jersey numbers, or a
-true action-recognition model that classifies rebounds/fouls/assists
-instead of relying on the scoreboard delta — would need its own labeled
-dataset (a few hundred+ hand-labeled examples) and GPU training time
-(e.g. a Colab notebook), which is a separate follow-on project, not
-something that happens automatically from stats typed into this app.
-The reference-stats check above is today's practical alternative: it
-doesn't make the AI smarter, but it makes inaccuracies visible so a
-coach can catch and fix them per game.
+data; it just finds "a person" generically. A model actually trained to
+recognize your team's jersey numbers exists now too (Phase 2 above,
+`train_jersey_classifier.py`) — but it only trains from crops you
+label by hand through `label_crops.py`, not from typed-in stats or
+box scores. A true action-recognition model that classifies
+rebounds/fouls/assists directly from motion, instead of relying on the
+scoreboard delta, would be a further, separate project on top of that —
+no tooling for it exists here. The reference-stats check above remains
+today's practical alternative for those event types: it doesn't make
+the AI smarter, but it makes inaccuracies visible so a coach can catch
+and fix them per game.
 
 **What's untested:** the download step (`yt-dlp` → `ffmpeg` → Claude
 vision) could not be exercised end-to-end during development — the dev
@@ -253,3 +287,21 @@ occluded players is a much harder case than the synthetic test, so
 expect the person detector to miss players or false-positive on
 spectators/coaches sometimes; that's exactly why guesses stay
 confirm-or-correct rather than auto-logged.
+
+`train_jersey_classifier.py` and `classify_jersey.py` were also tested
+end-to-end (train → save → load → predict, all producing valid output)
+against synthetic labeled crops (rendered jersey numbers on colored
+rectangles), confirming the code itself is correct. **Not yet
+confirmed: real-world accuracy against actual hand-labeled game
+footage** — that depends entirely on how much you label and how
+visually distinct your jerseys are, and can only really be judged once
+you've gone through the labeling workflow above with real crops. One
+sandbox-specific note: downloading pretrained ImageNet weights from
+`download.pytorch.org` is blocked by this dev sandbox's network policy
+(unrelated to YouTube/ultralytics.com, which are also blocked, but a
+separate host) — training was validated with randomly-initialized
+weights instead to confirm the code path works; a normal production
+host should reach `download.pytorch.org` without issue, and using the
+real pretrained weights (the default, unmodified behavior of
+`train_jersey_classifier.py`) matters a lot for accuracy on a small
+dataset, so don't skip it.

@@ -49,3 +49,7 @@ next-env.d.ts
 *.pt
 __pycache__/
 *.pyc
+
+# your trained jersey-number model (see README) — a host-specific deploy
+# artifact, not source; copy it directly to wherever video analysis runs
+/models/

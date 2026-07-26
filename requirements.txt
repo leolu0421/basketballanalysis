@@ -1,7 +1,11 @@
-# Player-tracking pipeline (scripts/track_players.py) — see README's Video
-# analysis section for what this is for and why it's optional/best-effort.
-# torch is pulled in automatically by ultralytics; no GPU required, but a GPU
-# host will run this substantially faster.
+# Player-tracking pipeline (scripts/track_players.py) and the optional
+# custom jersey-number classifier (scripts/train_jersey_classifier.py,
+# classify_jersey.py) — see README's Video analysis section for what these
+# are for and why they're optional/best-effort. No GPU required for either
+# (CPU works fine at this data scale), but a GPU host runs both faster.
 ultralytics==8.4.104
 opencv-python-headless==5.0.0.93
 lap==0.5.13
+torch==2.13.0
+torchvision==0.28.0
+pillow==12.3.0
