@@ -67,7 +67,47 @@ or persist binaries like that. Everything else (auth, roster, matches,
 manual tagging, Stats, Performance, Insights) works fine on Vercel as-is.
 If you want video analysis working in production, it needs a separate
 host with a persistent Node process (VPS, Railway, Fly.io, Docker) — see
-the Video analysis section below.
+"Deploying to Railway" below, and the Video analysis section further down.
+
+## Deploying to Railway
+
+Unlike Vercel, Railway runs the app as a normal persistent process (via
+the `Dockerfile` in this repo), so `yt-dlp`, `ffmpeg`, and `python3` all
+work and "Analyze video" actually functions. This has to be done from
+your own Railway account. Steps:
+
+1. **Get a Postgres database** — reuse the same Neon connection string
+   from your Vercel setup if you already have one; no need for a second
+   database.
+2. **New project on railway.app** → Deploy from GitHub repo → select
+   `leolu0421/basketballanalysis` and the branch you want to deploy.
+   Railway auto-detects the `Dockerfile` and builds from it — no
+   framework preset to pick, unlike Vercel.
+3. **Set environment variables** in the Railway project's Variables tab
+   (same values as your Vercel ones): `DATABASE_URL`, `AUTH_SECRET`,
+   `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `RESEND_FROM_EMAIL`.
+4. **Deploy.** The Dockerfile's `CMD` runs `prisma db push` on every
+   startup to keep the schema in sync, then starts the server — no
+   separate migration step, same idea as the Vercel build script.
+5. Railway gives you a `*.up.railway.app` URL (a custom domain can be
+   attached in the project settings if you want one) — sign up fresh
+   there once it's live.
+6. **Your trained jersey model** (see "Training your own jersey-number
+   model" below), if you have one: those two files aren't committed to
+   git by default (`.gitignore` excludes `/models/`). Since git push is
+   the only deploy mechanism here, commit them anyway if you want this
+   deploy to use them — `git add -f models/jersey/jersey_classifier.pt
+   models/jersey/jersey_classes.json` before committing. Without that,
+   the app runs fine and just skips straight to the Claude-vision
+   fallback for jersey reads (see pipeline.ts's `hasTrainedJerseyModel`).
+
+**Wasn't build-tested end-to-end**: Docker itself can't run in this dev
+sandbox (no privileged daemon access), so unlike the Python scripts
+above, the Dockerfile's actual build was checked by hand (every
+referenced file exists, each step passes standalone in this session) but
+never run as a real `docker build`. **If Railway's build fails, the
+build log will show exactly where** — same troubleshooting pattern as
+the Vercel issues earlier in this project.
 
 ## Scope (v1)
 

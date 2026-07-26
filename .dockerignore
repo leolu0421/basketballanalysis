@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.env
+.env.local
+*.pt
+models/
+__pycache__/
+*.pyc
+crops*/
+jersey_model/
