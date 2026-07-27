@@ -56,7 +56,7 @@ export async function POST(
       nodeReadable.pipe(writeStream);
     });
   } catch (err) {
-    console.error("Chunk upload failed:", err);
+    console.error(`Chunk upload failed (matchId=${matchId}, uploadId=${uploadId}, index=${index}):`, err);
     return NextResponse.json({ error: "Chunk upload failed. Try again." }, { status: 500 });
   }
 

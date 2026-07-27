@@ -3,6 +3,28 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 
 /**
+ * Creates every directory level one at a time instead of a single
+ * mkdir(path, { recursive: true }) call. Confirmed in production that a
+ * single recursive call can fail with ENOENT partway through on Railway's
+ * Volume filesystem (a network-backed volume, not plain local disk) even
+ * though the identical call works fine on a normal filesystem — this is
+ * more defensive against whatever that filesystem's quirk is.
+ */
+async function ensureDirDeep(targetPath: string): Promise<void> {
+  const isAbsolute = path.isAbsolute(targetPath);
+  const segments = targetPath.split(path.sep).filter(Boolean);
+  let current = isAbsolute ? path.sep : "";
+  for (const segment of segments) {
+    current = current ? path.join(current, segment) : segment;
+    try {
+      await mkdir(current);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+}
+
+/**
  * Where uploaded match videos live on disk. On Railway this should point at
  * a mounted Volume (see README's "Direct video upload" section) so files
  * survive redeploys — without a volume, this still works but files vanish
@@ -18,7 +40,7 @@ export function videoStoragePathFor(matchId: string, fileName: string): string {
 
 export async function ensureVideoDir(matchId: string): Promise<string> {
   const dir = path.join(/* turbopackIgnore: true */ VIDEO_STORAGE_DIR, matchId);
-  await mkdir(dir, { recursive: true });
+  await ensureDirDeep(dir);
   return dir;
 }
 
@@ -36,7 +58,7 @@ function chunkDirFor(matchId: string, uploadId: string): string {
 
 export async function ensureChunkDir(matchId: string, uploadId: string): Promise<string> {
   const dir = chunkDirFor(matchId, uploadId);
-  await mkdir(dir, { recursive: true });
+  await ensureDirDeep(dir);
   return dir;
 }
 
