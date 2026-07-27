@@ -28,6 +28,7 @@ type Job = {
   status: string;
   progress: number;
   errorMessage: string | null;
+  createdAt: string | Date;
   candidates: Candidate[];
 } | null;
 
@@ -47,6 +48,28 @@ function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/**
+ * Rough estimate only — linear extrapolation from elapsed time and current
+ * progress. The pipeline's phases (frame extraction, scoreboard reads,
+ * tracking) don't advance at a constant rate, so this will wobble around,
+ * especially early on — that's why it's withheld below MIN_PROGRESS_FOR_ESTIMATE.
+ */
+const MIN_PROGRESS_FOR_ESTIMATE = 8;
+
+function estimateRemainingLabel(createdAt: string | Date, progress: number, now: number): string | null {
+  if (progress < MIN_PROGRESS_FOR_ESTIMATE || progress >= 100) return null;
+  const startedAt = new Date(createdAt).getTime();
+  const elapsedSeconds = (now - startedAt) / 1000;
+  if (elapsedSeconds <= 0) return null;
+
+  const estimatedTotalSeconds = elapsedSeconds / (progress / 100);
+  const remainingSeconds = Math.max(0, estimatedTotalSeconds - elapsedSeconds);
+
+  if (remainingSeconds < 60) return "less than a minute left (estimate)";
+  const minutes = Math.round(remainingSeconds / 60);
+  return `~${minutes} minute${minutes === 1 ? "" : "s"} left (estimate)`;
 }
 
 function CandidateRow({
@@ -213,7 +236,9 @@ export function VideoAnalysisPanel({
   const [job, setJob] = useState<Job>(initialJob);
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isActive = job ? ACTIVE_STATUSES.includes(job.status) : false;
 
@@ -229,6 +254,17 @@ export function VideoAnalysisPanel({
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [isActive, matchId]);
+
+  useEffect(() => {
+    if (!isActive) {
+      if (tickRef.current) clearInterval(tickRef.current);
+      return;
+    }
+    tickRef.current = setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      if (tickRef.current) clearInterval(tickRef.current);
+    };
+  }, [isActive]);
 
   function handleStart() {
     setError(null);
@@ -274,8 +310,9 @@ export function VideoAnalysisPanel({
               style={{ width: `${job.progress}%` }}
             />
           </div>
-          <p className="mt-1 text-xs text-black/40">
-            {STATUS_LABELS[job.status] ?? job.status}
+          <p className="mt-1 flex items-center justify-between text-xs text-black/40">
+            <span>{STATUS_LABELS[job.status] ?? job.status}</span>
+            <span>{estimateRemainingLabel(job.createdAt, job.progress, now)}</span>
           </p>
         </div>
       )}

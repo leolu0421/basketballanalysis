@@ -34,6 +34,7 @@ type VideoAnalysisJob = {
   status: string;
   progress: number;
   errorMessage: string | null;
+  createdAt: string | Date;
   candidates: {
     id: string;
     videoTimestampSeconds: number;
@@ -83,6 +84,12 @@ export function TaggingWorkspace({
     return playerRef.current.getCurrentTime();
   }
 
+  function skip(deltaSeconds: number) {
+    if (!playerRef.current) return;
+    const current = playerRef.current.getCurrentTime();
+    playerRef.current.seekTo(Math.max(0, current + deltaSeconds));
+  }
+
   function logEvent(type: StatType, shotX?: number, shotY?: number) {
     if (!selectedPlayerId) return;
     startTransition(async () => {
@@ -130,6 +137,35 @@ export function TaggingWorkspace({
         ) : (
           <div className="flex aspect-video items-center justify-center rounded-xl bg-black/5 text-sm text-black/40">
             No video linked to this match yet.
+          </div>
+        )}
+
+        {hasVideo && (
+          <div className="flex items-center justify-center gap-2">
+            <button
+              onClick={() => skip(-30)}
+              className="rounded-lg border border-black/10 bg-white px-3 py-1.5 text-xs font-medium text-navy hover:border-brand"
+            >
+              ◀◀ 30s
+            </button>
+            <button
+              onClick={() => skip(-10)}
+              className="rounded-lg border border-black/10 bg-white px-3 py-1.5 text-xs font-medium text-navy hover:border-brand"
+            >
+              ◀ 10s
+            </button>
+            <button
+              onClick={() => skip(10)}
+              className="rounded-lg border border-black/10 bg-white px-3 py-1.5 text-xs font-medium text-navy hover:border-brand"
+            >
+              10s ▶
+            </button>
+            <button
+              onClick={() => skip(30)}
+              className="rounded-lg border border-black/10 bg-white px-3 py-1.5 text-xs font-medium text-navy hover:border-brand"
+            >
+              30s ▶▶
+            </button>
           </div>
         )}
 
