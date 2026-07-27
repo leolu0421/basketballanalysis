@@ -282,6 +282,26 @@ bytes even to the uploader, so this is a gray area against YouTube's
 Terms of Service, accepted here because it's the user's own footage and
 downloading it is the only way to avoid a manual upload step.
 
+**Confirmed in production**: on a real deploy (Railway), the very first
+"Analyze video" attempt hit `HTTP Error 429: Too Many Requests` straight
+from YouTube. This isn't a bug in the code — YouTube actively rate-limits
+and blocks download requests coming from cloud/datacenter IP ranges
+(which is what Railway, AWS, GCP, etc. all use) far more aggressively
+than a home internet connection, specifically because that traffic
+pattern looks like automated scraping. `--extractor-args
+"youtube:player_client=android,web"`, `--retries 3`, and
+`--sleep-requests 1` were added to the `yt-dlp` call as mitigations
+(alternate extraction path + backoff), and `deno` was added to the
+Docker image since yt-dlp also warned about needing a JS runtime for
+some signature deciphering. **Neither is guaranteed to fully resolve
+it** — this is an active, evolving fight between yt-dlp and YouTube's
+anti-bot measures specifically targeting cloud IPs, not a one-time fix.
+If 429s persist, the practical fallback is switching to direct video
+upload instead of a YouTube link (see the "Worst case" discussion this
+project had about that tradeoff) — that removes the download step (and
+its ToS gray area) entirely, at the cost of needing file storage and a
+different video player.
+
 **Deployment implication:** this pipeline shells out to `yt-dlp`,
 `ffmpeg`, and (for the tracking guess path) `python3`, and runs for
 minutes per video. That needs a persistent Node process — it will
