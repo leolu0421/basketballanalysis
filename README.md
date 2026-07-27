@@ -100,14 +100,23 @@ your own Railway account. Steps:
    models/jersey/jersey_classes.json` before committing. Without that,
    the app runs fine and just skips straight to the Claude-vision
    fallback for jersey reads (see pipeline.ts's `hasTrainedJerseyModel`).
+7. **If you'll use direct video upload** (see "Direct video upload"
+   below) instead of/alongside YouTube links, attach a Railway **Volume**
+   to the service (Settings → Volumes → New Volume), mount it at e.g.
+   `/data/videos`, and set the `VIDEO_STORAGE_DIR` environment variable
+   to that same path. Without a volume, uploaded videos still work but
+   get wiped on every redeploy, since a plain container's filesystem
+   isn't persistent.
 
-**Wasn't build-tested end-to-end**: Docker itself can't run in this dev
-sandbox (no privileged daemon access), so unlike the Python scripts
-above, the Dockerfile's actual build was checked by hand (every
-referenced file exists, each step passes standalone in this session) but
-never run as a real `docker build`. **If Railway's build fails, the
-build log will show exactly where** — same troubleshooting pattern as
-the Vercel issues earlier in this project.
+**Confirmed working in production**: this Dockerfile was deployed to a
+real Railway project during development. It failed once (`npm ci`
+couldn't find `prisma/schema.prisma` — fixed by copying the `prisma/`
+folder in before that step) and succeeded on the next push. The Docker
+build itself still can't be run in this dev sandbox (no privileged
+daemon access), so day-to-day changes to this Dockerfile going forward
+are still checked by hand rather than a local `docker build` — if a
+future change breaks the Railway build, the build log will show exactly
+where, same troubleshooting pattern as everything else in this project.
 
 ## Scope (v1)
 
@@ -145,6 +154,51 @@ verify a domain in Resend for reliable delivery to arbitrary users. This
 was not testable end-to-end in this session (no reachable Postgres or
 Resend from this sandbox) — verified via type-check/build only; confirm a
 real reset email arrives once deployed.
+
+## Direct video upload
+
+An alternative to pasting a YouTube link: upload the game video file
+directly from the match page. This exists because the YouTube-link path
+depends on `yt-dlp` successfully downloading from YouTube, which — as
+confirmed in production — YouTube can reject outright with `HTTP 429`
+for requests coming from cloud/datacenter IPs (see the "Confirmed in
+production" note in the Video analysis section below). Direct upload
+sidesteps that entirely: no download step, no YouTube ToS gray area for
+that specific match, and analysis runs immediately against the file you
+gave it.
+
+**How it works:** the client sends the raw file as the request body
+(not a multipart form) to `POST /api/matches/[matchId]/video?filename=...`,
+which streams it straight to disk without buffering the whole file in
+memory — matters since a 40-50 minute game video can be hundreds of MB
+to a few GB. Playback uses a plain HTML5 `<video>` element pointed at
+`GET /api/matches/[matchId]/video`, which supports HTTP Range requests
+so seeking works without downloading the whole file first. Uploading
+sets `match.videoFileName` and clears `match.youtubeVideoId` — the two
+are mutually exclusive per match, and the tagging page's player,
+"Analyze video" trigger, and the pipeline's download step all branch on
+which one is set (see `VideoSource` in `pipeline.ts`).
+
+**Storage**: uploaded files live at `VIDEO_STORAGE_DIR/<matchId>/<filename>`
+— see `.env.example` and "Deploying to Railway" above for why this needs
+to point at a persistent Volume in production, not the container's own
+(ephemeral) filesystem.
+
+**What's untested:** the upload route and player were validated by
+type-check/build, and the core streaming mechanics (the genuinely novel
+part — `Readable.fromWeb`/`toWeb`, write-stream piping, and Range-based
+partial reads for seeking) were isolate-tested outside Next.js with a
+synthetic 5MB file: the round-tripped upload was byte-identical to the
+source, and a Range-sliced read returned exactly the requested byte
+range. What's NOT tested: actually uploading a real multi-GB video
+end-to-end through a browser, over a real (possibly slow/flaky) home
+connection — this dev sandbox has no browser session to drive that.
+**Confirm a real upload completes successfully** once deployed,
+especially for large files — if it times out or fails partway through,
+the practical next step would be chunked/resumable upload, which is a
+meaningfully bigger feature than what's built here (the current version
+is a single continuous stream with no
+resume-from-partial-failure).
 
 ## Video analysis ("Suggested moments")
 

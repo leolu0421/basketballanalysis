@@ -281,10 +281,15 @@ async function guessCandidatePlayers(
  * candidate row for every detected score change. Runs entirely server-side
  * in the background — the caller does not await this to completion.
  *
- * Requires `yt-dlp` and `ffmpeg` on the host. Not viable on serverless
- * platforms without a persistent worker (no long-running child processes).
+ * Requires `ffmpeg` on the host, and (for youtube sources) `yt-dlp`. Not
+ * viable on serverless platforms without a persistent worker (no
+ * long-running child processes).
  */
-export async function runVideoAnalysisJob(jobId: string, youtubeVideoId: string) {
+export type VideoSource =
+  | { type: "youtube"; youtubeVideoId: string }
+  | { type: "file"; filePath: string };
+
+export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
   const workDir = await mkdtemp(path.join(os.tmpdir(), "video-analysis-"));
 
   try {
@@ -299,30 +304,37 @@ export async function runVideoAnalysisJob(jobId: string, youtubeVideoId: string)
       lastName: p.lastName,
     }));
 
-    await updateJob(jobId, { status: "DOWNLOADING", progress: 5 });
+    let videoPath: string;
+    if (source.type === "file") {
+      // Already sitting on disk (direct upload) — no download step needed.
+      videoPath = source.filePath;
+      await updateJob(jobId, { status: "EXTRACTING", progress: 20 });
+    } else {
+      await updateJob(jobId, { status: "DOWNLOADING", progress: 5 });
 
-    await run("yt-dlp", [
-      "-f",
-      "worst[ext=mp4][height>=360]/worst[height>=360]/worst",
-      "--no-playlist",
-      "--extractor-args",
-      "youtube:player_client=android,web",
-      "--retries",
-      "3",
-      "--sleep-requests",
-      "1",
-      "-o",
-      path.join(workDir, "video.%(ext)s"),
-      `https://www.youtube.com/watch?v=${youtubeVideoId}`,
-    ]);
+      await run("yt-dlp", [
+        "-f",
+        "worst[ext=mp4][height>=360]/worst[height>=360]/worst",
+        "--no-playlist",
+        "--extractor-args",
+        "youtube:player_client=android,web",
+        "--retries",
+        "3",
+        "--sleep-requests",
+        "1",
+        "-o",
+        path.join(workDir, "video.%(ext)s"),
+        `https://www.youtube.com/watch?v=${source.youtubeVideoId}`,
+      ]);
 
-    const downloadedName = (await readdir(workDir)).find((f) => f.startsWith("video."));
-    if (!downloadedName) {
-      throw new Error("yt-dlp finished but no video file was found");
+      const downloadedName = (await readdir(workDir)).find((f) => f.startsWith("video."));
+      if (!downloadedName) {
+        throw new Error("yt-dlp finished but no video file was found");
+      }
+      videoPath = path.join(workDir, downloadedName);
+
+      await updateJob(jobId, { status: "EXTRACTING", progress: 30 });
     }
-    const videoPath = path.join(workDir, downloadedName);
-
-    await updateJob(jobId, { status: "EXTRACTING", progress: 30 });
 
     const framesDir = path.join(workDir, "frames");
     await mkdir(framesDir, { recursive: true });

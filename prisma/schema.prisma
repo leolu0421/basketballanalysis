@@ -60,6 +60,7 @@ model Match {
   teamScore       Int?
   opponentScore   Int?
   youtubeVideoId  String?
+  videoFileName   String?
   createdAt       DateTime    @default(now())
   statEvents      StatEvent[]
   insights        Insight[]

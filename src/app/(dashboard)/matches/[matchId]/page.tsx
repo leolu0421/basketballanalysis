@@ -67,6 +67,7 @@ export default async function MatchDetailPage({
         <TaggingWorkspace
           matchId={match.id}
           youtubeVideoId={match.youtubeVideoId}
+          videoFileName={match.videoFileName}
           players={players}
           events={events}
           initialVideoJob={videoJob}

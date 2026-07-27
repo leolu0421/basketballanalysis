@@ -5,7 +5,8 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireTeam } from "@/lib/current-user";
 import { isAiConfigured } from "@/lib/ai/insights";
-import { runVideoAnalysisJob } from "@/lib/video-analysis/pipeline";
+import { runVideoAnalysisJob, type VideoSource } from "@/lib/video-analysis/pipeline";
+import { videoStoragePathFor } from "@/lib/video-storage";
 
 export type VideoAnalysisActionState = { error?: string } | undefined;
 
@@ -19,12 +20,17 @@ export async function startVideoAnalysisAction(
   }
 
   let jobId: string;
-  let youtubeVideoId: string;
+  let videoSource: VideoSource;
   try {
     const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
     if (!match) return { error: "Match not found" };
-    if (!match.youtubeVideoId) return { error: "This match has no linked YouTube video." };
-    youtubeVideoId = match.youtubeVideoId;
+    if (match.videoFileName) {
+      videoSource = { type: "file", filePath: videoStoragePathFor(matchId, match.videoFileName) };
+    } else if (match.youtubeVideoId) {
+      videoSource = { type: "youtube", youtubeVideoId: match.youtubeVideoId };
+    } else {
+      return { error: "This match has no video linked or uploaded yet." };
+    }
 
     const job = await prisma.videoAnalysisJob.create({
       data: { matchId, status: "PENDING" },
@@ -37,7 +43,7 @@ export async function startVideoAnalysisAction(
 
   // Fire-and-forget: the pipeline runs in the background and updates the job
   // row as it progresses. It handles its own errors internally.
-  void runVideoAnalysisJob(jobId, youtubeVideoId);
+  void runVideoAnalysisJob(jobId, videoSource);
 
   revalidatePath(`/matches/${matchId}`);
   return undefined;

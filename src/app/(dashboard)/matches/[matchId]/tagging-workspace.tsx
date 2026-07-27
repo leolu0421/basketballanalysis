@@ -5,10 +5,12 @@ import {
   YoutubePlayer,
   type YoutubePlayerHandle,
 } from "@/components/youtube-player";
+import { LocalVideoPlayer } from "@/components/local-video-player";
 import { ShotCourt } from "@/components/shot-court";
 import { STAT_LABELS, STAT_TYPES, isShotType, type StatType } from "@/lib/stat-types";
 import { logStatEventAction, deleteStatEventAction } from "@/lib/actions/match-actions";
 import { VideoAnalysisPanel } from "./video-analysis-panel";
+import { UploadVideoForm } from "./upload-video-form";
 
 type Player = {
   id: string;
@@ -52,12 +54,14 @@ function formatTime(seconds: number) {
 export function TaggingWorkspace({
   matchId,
   youtubeVideoId,
+  videoFileName,
   players,
   events,
   initialVideoJob,
 }: {
   matchId: string;
   youtubeVideoId: string | null;
+  videoFileName: string | null;
   players: Player[];
   events: StatEvent[];
   initialVideoJob: VideoAnalysisJob;
@@ -72,8 +76,10 @@ export function TaggingWorkspace({
 
   const selectedPlayer = players.find((p) => p.id === selectedPlayerId) ?? null;
 
+  const hasVideo = Boolean(youtubeVideoId || videoFileName);
+
   function currentTimestamp(): number | undefined {
-    if (!youtubeVideoId || !playerRef.current) return undefined;
+    if (!hasVideo || !playerRef.current) return undefined;
     return playerRef.current.getCurrentTime();
   }
 
@@ -117,12 +123,25 @@ export function TaggingWorkspace({
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       <div className="lg:col-span-2 space-y-4">
-        {youtubeVideoId ? (
+        {videoFileName ? (
+          <LocalVideoPlayer ref={playerRef} matchId={matchId} />
+        ) : youtubeVideoId ? (
           <YoutubePlayer ref={playerRef} videoId={youtubeVideoId} />
         ) : (
           <div className="flex aspect-video items-center justify-center rounded-xl bg-black/5 text-sm text-black/40">
             No video linked to this match yet.
           </div>
+        )}
+
+        {!videoFileName && (
+          <UploadVideoForm
+            matchId={matchId}
+            hint={
+              youtubeVideoId
+                ? "Having trouble with the YouTube link (e.g. it fails to download for analysis)? Upload the video file directly instead — this replaces the YouTube link for this match."
+                : undefined
+            }
+          />
         )}
 
         <div className="rounded-xl border border-black/5 bg-white p-4">
@@ -256,7 +275,7 @@ export function TaggingWorkspace({
 
         <VideoAnalysisPanel
           matchId={matchId}
-          hasVideo={Boolean(youtubeVideoId)}
+          hasVideo={hasVideo}
           initialJob={initialVideoJob}
           players={players}
           quarter={quarter}
