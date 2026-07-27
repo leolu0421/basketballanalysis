@@ -1,65 +1,12 @@
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireTeam } from "@/lib/current-user";
-import { ensureVideoDir, videoStoragePathFor } from "@/lib/video-storage";
+import { videoStoragePathFor } from "@/lib/video-storage";
 
 export const runtime = "nodejs";
-
-/**
- * Uploads a match video directly (as an alternative to a YouTube link).
- * The client sends the raw file as the request body (not multipart form
- * data) so it can be streamed straight to disk without buffering the whole
- * file in memory — matters for 40-50 minute game videos that can be
- * hundreds of MB to a few GB.
- */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ matchId: string }> }
-) {
-  const { matchId } = await params;
-  const { team } = await requireTeam();
-
-  const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
-  if (!match) {
-    return NextResponse.json({ error: "Match not found" }, { status: 404 });
-  }
-
-  if (!request.body) {
-    return NextResponse.json({ error: "No file data received" }, { status: 400 });
-  }
-
-  const rawName = request.nextUrl.searchParams.get("filename") || "video.mp4";
-  const safeName = rawName.replace(/[^a-zA-Z0-9._-]/g, "_");
-
-  try {
-    await ensureVideoDir(matchId);
-    const destPath = videoStoragePathFor(matchId, safeName);
-
-    await new Promise<void>((resolve, reject) => {
-      const writeStream = createWriteStream(destPath);
-      const nodeReadable = Readable.fromWeb(
-        request.body as import("stream/web").ReadableStream<Uint8Array>
-      );
-      nodeReadable.on("error", reject);
-      writeStream.on("error", reject);
-      writeStream.on("finish", () => resolve());
-      nodeReadable.pipe(writeStream);
-    });
-
-    await prisma.match.update({
-      where: { id: matchId },
-      data: { videoFileName: safeName, youtubeVideoId: null },
-    });
-  } catch (err) {
-    console.error("Video upload failed:", err);
-    return NextResponse.json({ error: "Upload failed. Try again." }, { status: 500 });
-  }
-
-  return NextResponse.json({ ok: true });
-}
 
 /**
  * Streams the uploaded video back for playback, with HTTP Range support so

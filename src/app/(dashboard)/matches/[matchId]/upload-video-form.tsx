@@ -3,50 +3,104 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
+// Small enough that a single chunk request finishes quickly even on a slow
+// connection — a 683MB single-shot upload was confirmed in production to
+// die partway through with a dropped connection, most likely a platform
+// reverse-proxy timeout on the one long-lived request. Splitting into many
+// short requests avoids that regardless of the exact cause.
+const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_RETRIES_PER_CHUNK = 3;
+
+function uploadChunk(url: string, chunk: Blob, onProgress: (loaded: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        try {
+          const body = JSON.parse(xhr.responseText);
+          reject(new Error(body.error ?? `Chunk upload failed (${xhr.status})`));
+        } catch {
+          reject(new Error(`Chunk upload failed (${xhr.status})`));
+        }
+      }
+    };
+    xhr.onerror = () => reject(new Error("Chunk upload failed — connection interrupted"));
+    xhr.send(chunk);
+  });
+}
+
+function makeUploadId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function UploadVideoForm({ matchId, hint }: { matchId: string; hint?: string }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setError(null);
     setProgress(0);
 
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/matches/${matchId}/video?filename=${encodeURIComponent(file.name)}`);
+    const uploadId = makeUploadId();
+    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+    let uploadedBytes = 0;
 
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) {
-        setProgress(Math.round((event.loaded / event.total) * 100));
-      }
-    };
+    try {
+      for (let index = 0; index < totalChunks; index++) {
+        const start = index * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+        const url = `/api/matches/${matchId}/video/chunk?uploadId=${uploadId}&index=${index}`;
 
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        setProgress(null);
-        router.refresh();
-      } else {
-        setProgress(null);
-        try {
-          const body = JSON.parse(xhr.responseText);
-          setError(body.error ?? "Upload failed. Try again.");
-        } catch {
-          setError("Upload failed. Try again.");
+        let lastErr: unknown;
+        let succeeded = false;
+        for (let attempt = 0; attempt < MAX_RETRIES_PER_CHUNK; attempt++) {
+          try {
+            await uploadChunk(url, chunk, (loaded) => {
+              setProgress(Math.round(((uploadedBytes + loaded) / file.size) * 100));
+            });
+            succeeded = true;
+            break;
+          } catch (err) {
+            lastErr = err;
+          }
         }
+        if (!succeeded) throw lastErr;
+
+        uploadedBytes += chunk.size;
+        setProgress(Math.round((uploadedBytes / file.size) * 100));
       }
-    };
 
-    xhr.onerror = () => {
+      const finalizeRes = await fetch(`/api/matches/${matchId}/video/finalize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uploadId, totalChunks, filename: file.name }),
+      });
+      if (!finalizeRes.ok) {
+        const body = await finalizeRes.json().catch(() => null);
+        throw new Error(body?.error ?? "Failed to finish upload.");
+      }
+
       setProgress(null);
-      setError("Upload failed — connection interrupted. Try again.");
-    };
-
-    xhr.send(file);
-    if (inputRef.current) inputRef.current.value = "";
+      router.refresh();
+    } catch (err) {
+      setProgress(null);
+      setError(err instanceof Error ? err.message : "Upload failed. Try again.");
+    } finally {
+      if (inputRef.current) inputRef.current.value = "";
+    }
   }
 
   return (

@@ -167,38 +167,55 @@ sidesteps that entirely: no download step, no YouTube ToS gray area for
 that specific match, and analysis runs immediately against the file you
 gave it.
 
-**How it works:** the client sends the raw file as the request body
-(not a multipart form) to `POST /api/matches/[matchId]/video?filename=...`,
-which streams it straight to disk without buffering the whole file in
-memory — matters since a 40-50 minute game video can be hundreds of MB
-to a few GB. Playback uses a plain HTML5 `<video>` element pointed at
-`GET /api/matches/[matchId]/video`, which supports HTTP Range requests
-so seeking works without downloading the whole file first. Uploading
-sets `match.videoFileName` and clears `match.youtubeVideoId` — the two
-are mutually exclusive per match, and the tagging page's player,
-"Analyze video" trigger, and the pipeline's download step all branch on
-which one is set (see `VideoSource` in `pipeline.ts`).
+**How it works:** the file is split client-side into 10MB chunks, each
+sent as its own short-lived request to `POST
+/api/matches/[matchId]/video/chunk?uploadId=...&index=...`, which streams
+straight to disk without buffering in memory. Once every chunk succeeds,
+`POST /api/matches/[matchId]/video/finalize` concatenates them in order
+into the real video file and links it to the match. Each chunk retries
+up to 3 times on failure before giving up. Playback uses a plain HTML5
+`<video>` element pointed at `GET /api/matches/[matchId]/video`, which
+supports HTTP Range requests so seeking works without downloading the
+whole file first. A successful upload sets `match.videoFileName` and
+clears `match.youtubeVideoId` — the two are mutually exclusive per
+match, and the tagging page's player, "Analyze video" trigger, and the
+pipeline's download step all branch on which one is set (see
+`VideoSource` in `pipeline.ts`).
 
-**Storage**: uploaded files live at `VIDEO_STORAGE_DIR/<matchId>/<filename>`
-— see `.env.example` and "Deploying to Railway" above for why this needs
-to point at a persistent Volume in production, not the container's own
-(ephemeral) filesystem.
+**Why chunked, not a single request:** the first version sent the whole
+file as one request. Confirmed in production against a real 683MB game
+video: it failed partway through (~14%) with the connection dropping —
+most likely a platform reverse-proxy timeout on a single long-lived
+request, though the exact cause wasn't confirmed via logs. Splitting
+into many small requests sidesteps that regardless of the precise cause,
+since no individual request runs long enough to be at risk. **Known
+gap**: if the browser tab is closed or navigates away mid-upload, the
+next attempt starts over from chunk 0 with a new `uploadId` — already-
+uploaded chunks from the abandoned attempt are simply orphaned on disk
+(cleaned up whenever a `finalizeChunks` call for that same `uploadId`
+completes, which won't happen for an abandoned one). This isn't
+byte-loss or corruption, just wasted disk space from an incomplete
+attempt; true resume-after-reload would need the client to persist
+`uploadId`/progress and query which chunks the server already has,
+which isn't built.
 
-**What's untested:** the upload route and player were validated by
-type-check/build, and the core streaming mechanics (the genuinely novel
-part — `Readable.fromWeb`/`toWeb`, write-stream piping, and Range-based
-partial reads for seeking) were isolate-tested outside Next.js with a
-synthetic 5MB file: the round-tripped upload was byte-identical to the
-source, and a Range-sliced read returned exactly the requested byte
-range. What's NOT tested: actually uploading a real multi-GB video
-end-to-end through a browser, over a real (possibly slow/flaky) home
-connection — this dev sandbox has no browser session to drive that.
-**Confirm a real upload completes successfully** once deployed,
-especially for large files — if it times out or fails partway through,
-the practical next step would be chunked/resumable upload, which is a
-meaningfully bigger feature than what's built here (the current version
-is a single continuous stream with no
-resume-from-partial-failure).
+**Storage**: uploaded files (and in-progress chunks, under a
+`_uploads/<uploadId>/` subfolder per match) live at
+`VIDEO_STORAGE_DIR/<matchId>/...` — see `.env.example` and "Deploying to
+Railway" above for why this needs to point at a persistent Volume in
+production, not the container's own (ephemeral) filesystem.
+
+**What's tested vs. not:** the chunk-write-then-concatenate logic was
+isolate-tested outside Next.js with a synthetic ~26MB file split into
+uneven chunks (including a short final chunk) — the reassembled file
+was confirmed byte-identical to the original. The single-shot version of
+this upload (superseded by chunking) was also confirmed to actually fail
+in production exactly as predicted, which is what prompted this rework.
+What's NOT tested: the chunked version's real end-to-end behavior over
+an actual flaky/slow connection with real retries firing — only the
+underlying file mechanics and the (now-removed) single-shot path were
+validated against real production traffic. Confirm a large real upload
+completes successfully once deployed.
 
 ## Video analysis ("Suggested moments")
 
