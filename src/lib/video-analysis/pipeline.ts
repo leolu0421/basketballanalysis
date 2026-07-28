@@ -246,7 +246,7 @@ async function guessCandidatePlayers(
     // stale-job safety net elsewhere in the app uses this to detect a
     // genuinely stuck job vs. one that's just working through a lot of
     // candidates.
-    await updateJob(jobId, { progress: Math.min(99, 96 + Math.round((index / candidates.length) * 3)) });
+    await updateJob(jobId, { progress: Math.min(99, 55 + Math.round((index / candidates.length) * 44)) });
 
     if (!trackingAvailable) {
       fallbackIndices.push(index);
@@ -359,7 +359,7 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
     if (source.type === "file") {
       // Already sitting on disk (direct upload) — no download step needed.
       videoPath = source.filePath;
-      await updateJob(jobId, { status: "EXTRACTING", progress: 20 });
+      await updateJob(jobId, { status: "EXTRACTING", progress: 5 });
     } else {
       await updateJob(jobId, { status: "DOWNLOADING", progress: 5 });
 
@@ -388,7 +388,7 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
       }
       videoPath = path.join(workDir, downloadedName);
 
-      await updateJob(jobId, { status: "EXTRACTING", progress: 30 });
+      await updateJob(jobId, { status: "EXTRACTING", progress: 15 });
     }
 
     const framesDir = path.join(workDir, "frames");
@@ -405,7 +405,7 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
       throw new Error("No frames were extracted from the video");
     }
 
-    await updateJob(jobId, { status: "ANALYZING", progress: 40 });
+    await updateJob(jobId, { status: "ANALYZING", progress: 20 });
 
     const allReads: FrameRead[] = [];
     for (let i = 0; i < frameFiles.length; i += FRAMES_PER_VISION_CALL) {
@@ -418,14 +418,21 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
       const reads = await readScoreboardBatch(batch);
       allReads.push(...reads);
 
-      const pct = 40 + Math.round(((i + batch.length) / frameFiles.length) * 55);
-      await updateJob(jobId, { progress: Math.min(pct, 95) });
+      // ANALYZING (scoreboard reads) covers 20-55; MATCHING (per-candidate
+      // tracking, below) gets the much bigger 55-99 share even though it's
+      // fewer steps — confirmed in production that tracking (fresh model
+      // load + inference per candidate) takes far longer per step than a
+      // scoreboard read, so it needs a proportionally larger slice of the
+      // bar or the progress bar (and its ETA) looks "almost done" for most
+      // of the job's real wall-clock time.
+      const pct = 20 + Math.round(((i + batch.length) / frameFiles.length) * 35);
+      await updateJob(jobId, { progress: Math.min(pct, 55) });
     }
 
     const candidates = buildScoreCandidates(allReads, FRAME_INTERVAL_SECONDS);
 
     if (candidates.length > 0) {
-      await updateJob(jobId, { status: "MATCHING", progress: 96 });
+      await updateJob(jobId, { status: "MATCHING", progress: 55 });
       const guesses = await guessCandidatePlayers(
         jobId,
         candidates,

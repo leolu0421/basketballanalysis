@@ -74,6 +74,7 @@ export function TaggingWorkspace({
   const [pendingShotType, setPendingShotType] = useState<StatType | null>(null);
   const [isPending, startTransition] = useTransition();
   const playerRef = useRef<YoutubePlayerHandle>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
 
   const selectedPlayer = players.find((p) => p.id === selectedPlayerId) ?? null;
 
@@ -88,6 +89,14 @@ export function TaggingWorkspace({
     if (!playerRef.current) return;
     const current = playerRef.current.getCurrentTime();
     playerRef.current.seekTo(Math.max(0, current + deltaSeconds));
+  }
+
+  // Suggested-moment rows can be far below the video on smaller screens, so
+  // seeking alone isn't enough to confirm a guess against the footage — pull
+  // the video back into view at the same time.
+  function seekAndReveal(seconds: number) {
+    playerRef.current?.seekTo(seconds);
+    videoContainerRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   function logEvent(type: StatType, shotX?: number, shotY?: number) {
@@ -130,15 +139,17 @@ export function TaggingWorkspace({
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       <div className="lg:col-span-2 space-y-4">
-        {videoFileName ? (
-          <LocalVideoPlayer ref={playerRef} matchId={matchId} />
-        ) : youtubeVideoId ? (
-          <YoutubePlayer ref={playerRef} videoId={youtubeVideoId} />
-        ) : (
-          <div className="flex aspect-video items-center justify-center rounded-xl bg-black/5 text-sm text-black/40">
-            No video linked to this match yet.
-          </div>
-        )}
+        <div ref={videoContainerRef}>
+          {videoFileName ? (
+            <LocalVideoPlayer ref={playerRef} matchId={matchId} />
+          ) : youtubeVideoId ? (
+            <YoutubePlayer ref={playerRef} videoId={youtubeVideoId} />
+          ) : (
+            <div className="flex aspect-video items-center justify-center rounded-xl bg-black/5 text-sm text-black/40">
+              No video linked to this match yet.
+            </div>
+          )}
+        </div>
 
         {hasVideo && (
           <div className="flex items-center justify-center gap-2">
@@ -315,7 +326,7 @@ export function TaggingWorkspace({
           initialJob={initialVideoJob}
           players={players}
           quarter={quarter}
-          onSeek={(seconds) => playerRef.current?.seekTo(seconds)}
+          onSeek={seekAndReveal}
         />
       </div>
 

@@ -51,24 +51,40 @@ function formatTime(seconds: number) {
 }
 
 /**
- * Rough estimate only — linear extrapolation from elapsed time and current
- * progress. The pipeline's phases (frame extraction, scoreboard reads,
- * tracking) don't advance at a constant rate, so this will wobble around,
- * especially early on — that's why it's withheld below MIN_PROGRESS_FOR_ESTIMATE.
+ * Rough estimate only. The pipeline's phases (frame extraction, scoreboard
+ * reads, per-candidate tracking) advance at very different rates — tracking
+ * in particular is much slower per step than a scoreboard read — so a
+ * simple elapsed-time/progress average since job start (the original
+ * approach) badly overestimates speed once a slow phase is reached, showing
+ * "less than a minute left" for many real minutes. Using only the recent
+ * window's rate adapts to whichever phase is currently running.
  */
 const MIN_PROGRESS_FOR_ESTIMATE = 8;
+const SAMPLE_WINDOW_MS = 90_000;
+const MIN_SAMPLE_SPAN_MS = 8_000;
 
-function estimateRemainingLabel(createdAt: string | Date, progress: number, now: number): string | null {
+type ProgressSample = { progress: number; time: number };
+
+function estimateRemainingLabel(
+  samples: ProgressSample[],
+  progress: number,
+  now: number
+): string | null {
   if (progress < MIN_PROGRESS_FOR_ESTIMATE || progress >= 100) return null;
-  const startedAt = new Date(createdAt).getTime();
-  const elapsedSeconds = (now - startedAt) / 1000;
-  if (elapsedSeconds <= 0) return null;
+  if (samples.length < 2) return null;
 
-  const estimatedTotalSeconds = elapsedSeconds / (progress / 100);
-  const remainingSeconds = Math.max(0, estimatedTotalSeconds - elapsedSeconds);
+  const oldest = samples[0];
+  const spanMs = now - oldest.time;
+  if (spanMs < MIN_SAMPLE_SPAN_MS) return null;
 
-  if (remainingSeconds < 60) return "less than a minute left (estimate)";
-  const minutes = Math.round(remainingSeconds / 60);
+  const progressDelta = progress - oldest.progress;
+  if (progressDelta <= 0) return "still working (progress has slowed)";
+
+  const rate = progressDelta / spanMs;
+  const remainingMs = (100 - progress) / rate;
+
+  if (remainingMs < 60_000) return "less than a minute left (estimate)";
+  const minutes = Math.round(remainingMs / 60_000);
   return `~${minutes} minute${minutes === 1 ? "" : "s"} left (estimate)`;
 }
 
@@ -127,8 +143,9 @@ function CandidateRow({
       <div className="flex items-center justify-between">
         <button
           onClick={() => onSeek(candidate.videoTimestampSeconds)}
-          className="text-left font-medium text-navy hover:underline"
+          className="flex items-center gap-1 text-left font-medium text-navy hover:underline"
         >
+          <span aria-hidden>▶</span>
           {formatTime(candidate.videoTimestampSeconds)} — {candidate.previousScoreText ?? "?"} →{" "}
           {candidate.scoreText ?? "?"}
         </button>
@@ -236,31 +253,55 @@ export function VideoAnalysisPanel({
   const [job, setJob] = useState<Job>(initialJob);
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [now, setNow] = useState(() => Date.now());
+  const [estimateLabel, setEstimateLabel] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const samplesRef = useRef<ProgressSample[]>([]);
+  const progressRef = useRef(0);
 
   const isActive = job ? ACTIVE_STATUSES.includes(job.status) : false;
 
+  function recordSample(progress: number) {
+    const time = Date.now();
+    progressRef.current = progress;
+    const samples = samplesRef.current;
+    samples.push({ progress, time });
+    const cutoff = time - SAMPLE_WINDOW_MS;
+    while (samples.length > 1 && samples[0].time < cutoff) samples.shift();
+  }
+
   useEffect(() => {
     if (!isActive) {
+      samplesRef.current = [];
       if (pollRef.current) clearInterval(pollRef.current);
       return;
     }
+    samplesRef.current = [{ progress: job?.progress ?? 0, time: Date.now() }];
+    progressRef.current = job?.progress ?? 0;
     pollRef.current = setInterval(() => {
-      getVideoAnalysisStatus(matchId).then((latest) => setJob(latest as Job));
+      getVideoAnalysisStatus(matchId).then((latest) => {
+        setJob(latest as Job);
+        if (latest) recordSample(latest.progress);
+      });
     }, 4000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, matchId]);
 
+  // A timer-driven callback (not a plain derived-state effect) so the ETA
+  // label re-evaluates every second even between polls, using whatever
+  // samples have accumulated so far.
   useEffect(() => {
     if (!isActive) {
       if (tickRef.current) clearInterval(tickRef.current);
       return;
     }
-    tickRef.current = setInterval(() => setNow(Date.now()), 1000);
+    tickRef.current = setInterval(() => {
+      const nowMs = Date.now();
+      setEstimateLabel(estimateRemainingLabel(samplesRef.current, progressRef.current, nowMs));
+    }, 1000);
     return () => {
       if (tickRef.current) clearInterval(tickRef.current);
     };
@@ -268,6 +309,7 @@ export function VideoAnalysisPanel({
 
   function handleStart() {
     setError(null);
+    setEstimateLabel(null);
     startTransition(async () => {
       const result = await startVideoAnalysisAction(matchId);
       if (result?.error) {
@@ -312,7 +354,7 @@ export function VideoAnalysisPanel({
           </div>
           <p className="mt-1 flex items-center justify-between text-xs text-black/40">
             <span>{STATUS_LABELS[job.status] ?? job.status}</span>
-            <span>{estimateRemainingLabel(job.createdAt, job.progress, now)}</span>
+            <span>{estimateLabel}</span>
           </p>
         </div>
       )}
