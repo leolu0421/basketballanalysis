@@ -457,3 +457,40 @@ host should reach `download.pytorch.org` without issue, and using the
 real pretrained weights (the default, unmodified behavior of
 `train_jersey_classifier.py`) matters a lot for accuracy on a small
 dataset, so don't skip it.
+
+**Confirmed in production, and fixed**: a real analysis run against a
+real 46-minute game video (direct upload, not YouTube) got stuck showing
+"Analyzing…" for hours with no error and no progress. Root cause: no
+child process spawned by this pipeline (`yt-dlp`, `ffmpeg`,
+`track_players.py`, `classify_jersey.py`) had a timeout — a hung or just
+very slow (Railway's Hobby-plan CPU is limited, and `track_players.py`
+reloads the YOLO model from scratch on every single candidate rather
+than once per job) subprocess would block the promise forever, since
+`close`/`error` never fired. Fixed two ways:
+1. Every `run()`/`runCapture()` call site now passes an explicit
+   timeout (2-15 minutes depending on the step); on timeout the child is
+   killed and the promise rejects instead of hanging. In the tracking
+   loop, one candidate timing out already triggers the existing
+   fallback-to-wide-frame-guessing for all remaining candidates, so a
+   single slow candidate can no longer stall the whole job.
+2. As a second line of defense independent of the above, `MATCHING`
+   progress now updates per-candidate (not just once at the phase
+   start), and `getVideoAnalysisStatus` auto-fails any job whose
+   `updatedAt` is more than 20 minutes stale while still "active" —
+   this is what actually unstuck the real stuck job from this incident,
+   and protects against any future hang the timeouts above don't cover.
+
+Separately, the same production run surfaced a recurring uncaught
+`TypeError: Invalid state: Controller is already closed`
+(`ERR_INVALID_STATE`) in the deploy logs from the video-streaming route,
+likely from a `<video>` element aborting one Range request to start
+another (a normal seek). `Readable.toWeb(createReadStream(...))` doesn't
+guard against operating on an already-closed controller in that case —
+replaced with a hand-rolled wrapper that treats "controller already
+closed" as an expected, silent no-op (client disconnected) rather than
+an error. A local test simulating a mid-stream cancel didn't reproduce
+the exact race (it likely needs a real HTTP-level abort, not just a web
+`ReadableStream.cancel()`), so this is a defensive fix based on the
+error's signature rather than one confirmed to eliminate it — worth
+checking the deploy logs again after some real usage to confirm it's
+actually gone.

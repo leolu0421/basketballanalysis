@@ -49,17 +49,42 @@ export async function startVideoAnalysisAction(
   return undefined;
 }
 
+const ACTIVE_JOB_STATUSES = ["PENDING", "DOWNLOADING", "EXTRACTING", "ANALYZING", "MATCHING"];
+// Confirmed in production: a job can get stuck showing "Analyzing…"
+// indefinitely if a child process hangs with nothing to catch it (fixed at
+// the source with per-process timeouts in pipeline.ts, but this is a second
+// line of defense so a job can never block retries forever even if some
+// future failure mode isn't covered by those timeouts). Set well above the
+// ~5-6 minute worst-case single step, since a real multi-candidate job
+// legitimately keeps updatedAt fresh every candidate, not every step.
+const STALE_JOB_MS = 20 * 60 * 1000;
+
 export async function getVideoAnalysisStatus(matchId: string) {
   const { team } = await requireTeam();
   try {
     const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
     if (!match) return null;
 
-    const job = await prisma.videoAnalysisJob.findFirst({
+    let job = await prisma.videoAnalysisJob.findFirst({
       where: { matchId },
       orderBy: { createdAt: "desc" },
       include: { candidates: { where: { dismissed: false }, orderBy: { videoTimestampSeconds: "asc" } } },
     });
+
+    if (
+      job &&
+      ACTIVE_JOB_STATUSES.includes(job.status) &&
+      Date.now() - job.updatedAt.getTime() > STALE_JOB_MS
+    ) {
+      job = await prisma.videoAnalysisJob.update({
+        where: { id: job.id },
+        data: {
+          status: "FAILED",
+          errorMessage: "Analysis stalled and was stopped automatically. Try again.",
+        },
+        include: { candidates: { where: { dismissed: false }, orderBy: { videoTimestampSeconds: "asc" } } },
+      });
+    }
 
     return job;
   } catch (err) {

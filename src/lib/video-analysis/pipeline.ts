@@ -23,28 +23,61 @@ const CLASSIFY_SCRIPT_PATH = path.join(process.cwd(), "scripts", "classify_jerse
 const JERSEY_MODEL_DIR = path.join(process.cwd(), "models", "jersey");
 const LOCAL_MODEL_CONFIDENCE_THRESHOLD = 0.6;
 
-function run(cmd: string, args: string[]): Promise<void> {
+// Generous but bounded — confirmed in production that an unbounded child
+// process (no timeout at all, previously) can leave a job stuck showing
+// "Analyzing…" indefinitely under constrained CPU with nothing to catch it.
+const YTDLP_TIMEOUT_MS = 15 * 60 * 1000;
+const FFMPEG_FULL_VIDEO_TIMEOUT_MS = 10 * 60 * 1000;
+const FFMPEG_CLIP_TIMEOUT_MS = 2 * 60 * 1000;
+const TRACK_TIMEOUT_MS = 3 * 60 * 1000;
+const CLASSIFY_TIMEOUT_MS = 2 * 60 * 1000;
+
+/**
+ * Confirmed in production: a hung (or just very slow, under constrained
+ * CPU) child process here previously left a job stuck showing "Analyzing…"
+ * for hours with nothing to catch it, since close/error never fired. Every
+ * call site now passes an explicit timeoutMs so a stuck process gets
+ * killed and the promise rejects instead of hanging forever.
+ */
+function run(cmd: string, args: string[], timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args);
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
     child.stderr?.on("data", (d) => {
       stderr += d.toString();
     });
     child.on("error", (err) => {
+      clearTimeout(timer);
       reject(new Error(`Failed to run ${cmd}: ${err.message}`));
     });
     child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(-1500)}`));
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${cmd} timed out after ${Math.round(timeoutMs / 1000)}s and was killed`));
+      } else if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(-1500)}`));
+      }
     });
   });
 }
 
-function runCapture(cmd: string, args: string[]): Promise<string> {
+function runCapture(cmd: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args);
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
     child.stdout?.on("data", (d) => {
       stdout += d.toString();
     });
@@ -52,11 +85,18 @@ function runCapture(cmd: string, args: string[]): Promise<string> {
       stderr += d.toString();
     });
     child.on("error", (err) => {
+      clearTimeout(timer);
       reject(new Error(`Failed to run ${cmd}: ${err.message}`));
     });
     child.on("close", (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(-1500)}`));
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${cmd} timed out after ${Math.round(timeoutMs / 1000)}s and was killed`));
+      } else if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(-1500)}`));
+      }
     });
   });
 }
@@ -82,7 +122,11 @@ type JerseyPrediction = { crop: string; label: string; confidence: number };
 async function classifyCropsLocally(crops: string[]): Promise<JerseyPrediction[] | null> {
   if (crops.length === 0) return null;
   try {
-    const stdout = await runCapture("python3", [CLASSIFY_SCRIPT_PATH, JERSEY_MODEL_DIR, ...crops]);
+    const stdout = await runCapture(
+      "python3",
+      [CLASSIFY_SCRIPT_PATH, JERSEY_MODEL_DIR, ...crops],
+      CLASSIFY_TIMEOUT_MS
+    );
     const parsed = JSON.parse(stdout) as { predictions?: JerseyPrediction[]; error?: string };
     return parsed.predictions ?? null;
   } catch (err) {
@@ -132,28 +176,27 @@ async function trackCandidate(
   const trackOutDir = path.join(workDir, "tracks", `candidate_${index}`);
   await mkdir(path.dirname(clipPath), { recursive: true });
 
-  await run("ffmpeg", [
-    "-ss",
-    String(clipStart),
-    "-i",
-    videoPath,
-    "-t",
-    String(clipDuration),
-    "-an",
-    clipPath,
-  ]);
+  await run(
+    "ffmpeg",
+    ["-ss", String(clipStart), "-i", videoPath, "-t", String(clipDuration), "-an", clipPath],
+    FFMPEG_CLIP_TIMEOUT_MS
+  );
 
-  await run("python3", [
-    TRACK_SCRIPT_PATH,
-    clipPath,
-    trackOutDir,
-    "--fps",
-    String(TRACK_SAMPLE_FPS),
-    "--start",
-    "0",
-    "--end",
-    String(clipDuration),
-  ]);
+  await run(
+    "python3",
+    [
+      TRACK_SCRIPT_PATH,
+      clipPath,
+      trackOutDir,
+      "--fps",
+      String(TRACK_SAMPLE_FPS),
+      "--start",
+      "0",
+      "--end",
+      String(clipDuration),
+    ],
+    TRACK_TIMEOUT_MS
+  );
 
   const raw = await readFile(path.join(trackOutDir, "tracks.json"), "utf-8");
   const parsed = JSON.parse(raw) as { tracks: { trackId: number; crops: string[] }[] };
@@ -181,6 +224,7 @@ async function trackCandidate(
  * identifies jersey numbers.
  */
 async function guessCandidatePlayers(
+  jobId: string,
   candidates: ScoreCandidate[],
   videoPath: string,
   workDir: string,
@@ -197,6 +241,13 @@ async function guessCandidatePlayers(
   const fallbackIndices: number[] = [];
 
   for (let index = 0; index < candidates.length; index++) {
+    // Keeps the job row's updatedAt fresh through a potentially long loop
+    // (dozens of candidates, each with its own subprocess spawns) — a
+    // stale-job safety net elsewhere in the app uses this to detect a
+    // genuinely stuck job vs. one that's just working through a lot of
+    // candidates.
+    await updateJob(jobId, { progress: Math.min(99, 96 + Math.round((index / candidates.length) * 3)) });
+
     if (!trackingAvailable) {
       fallbackIndices.push(index);
       continue;
@@ -312,20 +363,24 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
     } else {
       await updateJob(jobId, { status: "DOWNLOADING", progress: 5 });
 
-      await run("yt-dlp", [
-        "-f",
-        "worst[ext=mp4][height>=360]/worst[height>=360]/worst",
-        "--no-playlist",
-        "--extractor-args",
-        "youtube:player_client=android,web",
-        "--retries",
-        "3",
-        "--sleep-requests",
-        "1",
-        "-o",
-        path.join(workDir, "video.%(ext)s"),
-        `https://www.youtube.com/watch?v=${source.youtubeVideoId}`,
-      ]);
+      await run(
+        "yt-dlp",
+        [
+          "-f",
+          "worst[ext=mp4][height>=360]/worst[height>=360]/worst",
+          "--no-playlist",
+          "--extractor-args",
+          "youtube:player_client=android,web",
+          "--retries",
+          "3",
+          "--sleep-requests",
+          "1",
+          "-o",
+          path.join(workDir, "video.%(ext)s"),
+          `https://www.youtube.com/watch?v=${source.youtubeVideoId}`,
+        ],
+        YTDLP_TIMEOUT_MS
+      );
 
       const downloadedName = (await readdir(workDir)).find((f) => f.startsWith("video."));
       if (!downloadedName) {
@@ -339,15 +394,11 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
     const framesDir = path.join(workDir, "frames");
     await mkdir(framesDir, { recursive: true });
 
-    await run("ffmpeg", [
-      "-i",
-      videoPath,
-      "-vf",
-      `fps=1/${FRAME_INTERVAL_SECONDS}`,
-      "-q:v",
-      "5",
-      path.join(framesDir, "frame_%05d.jpg"),
-    ]);
+    await run(
+      "ffmpeg",
+      ["-i", videoPath, "-vf", `fps=1/${FRAME_INTERVAL_SECONDS}`, "-q:v", "5", path.join(framesDir, "frame_%05d.jpg")],
+      FFMPEG_FULL_VIDEO_TIMEOUT_MS
+    );
 
     const frameFiles = (await readdir(framesDir)).filter((f) => f.endsWith(".jpg")).sort();
     if (frameFiles.length === 0) {
@@ -376,6 +427,7 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
     if (candidates.length > 0) {
       await updateJob(jobId, { status: "MATCHING", progress: 96 });
       const guesses = await guessCandidatePlayers(
+        jobId,
         candidates,
         videoPath,
         workDir,
