@@ -17,6 +17,7 @@ const FRAME_INTERVAL_SECONDS = 15;
 const FRAMES_PER_VISION_CALL = 10;
 const CANDIDATES_PER_GUESS_CALL = 4;
 const TRACK_CLIP_PADDING_SECONDS = 4;
+const MAX_TRACK_CLIP_DURATION_SECONDS = 45;
 const TRACK_SAMPLE_FPS = 5;
 const TRACK_SCRIPT_PATH = path.join(process.cwd(), "scripts", "track_players.py");
 const CLASSIFY_SCRIPT_PATH = path.join(process.cwd(), "scripts", "classify_jersey.py");
@@ -163,15 +164,30 @@ function resolvePlayerId(
  * reliably than a wide-shot frame. Requires Python 3 + the deps in
  * requirements.txt on the host; throws if unavailable so the caller can fall
  * back to the wide-frame approach.
+ *
+ * Confirmed in production: a fixed +/-4s window around the candidate's
+ * midpoint timestamp can completely miss the actual play whenever the
+ * scoreboard was obscured for a while (camera pans away, replay, foul
+ * review) — the real shot can be much closer to gapStartSeconds (last
+ * confirmed old score) than to the midpoint, especially once the gap
+ * between old and new scoreboard sightings spans multiple sample
+ * intervals. The clip now covers the whole gap (plus a little padding),
+ * capped so a single long stoppage doesn't blow up processing time.
  */
 async function trackCandidate(
   videoPath: string,
   workDir: string,
   index: number,
-  timestampSeconds: number
+  gapStartSeconds: number,
+  gapEndSeconds: number
 ): Promise<TrackToGuess[]> {
-  const clipStart = Math.max(0, timestampSeconds - TRACK_CLIP_PADDING_SECONDS);
-  const clipDuration = TRACK_CLIP_PADDING_SECONDS * 2;
+  const center = (gapStartSeconds + gapEndSeconds) / 2;
+  const desiredDuration = Math.min(
+    gapEndSeconds - gapStartSeconds + TRACK_CLIP_PADDING_SECONDS * 2,
+    MAX_TRACK_CLIP_DURATION_SECONDS
+  );
+  const clipStart = Math.max(0, center - desiredDuration / 2);
+  const clipDuration = desiredDuration;
   const clipPath = path.join(workDir, "clips", `candidate_${index}.mp4`);
   const trackOutDir = path.join(workDir, "tracks", `candidate_${index}`);
   await mkdir(path.dirname(clipPath), { recursive: true });
@@ -255,7 +271,13 @@ async function guessCandidatePlayers(
 
     const candidate = candidates[index];
     try {
-      const tracks = await trackCandidate(videoPath, workDir, index, candidate.videoTimestampSeconds);
+      const tracks = await trackCandidate(
+        videoPath,
+        workDir,
+        index,
+        candidate.gapStartSeconds,
+        candidate.gapEndSeconds
+      );
       const guess = await guessCandidateFromTracks(
         { previousScoreText: candidate.previousScoreText, scoreText: candidate.scoreText },
         tracks,
@@ -444,9 +466,14 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
       );
 
       await prisma.videoAnalysisCandidate.createMany({
+        // gapStartSeconds/gapEndSeconds are in-memory only (sizing the
+        // tracking clip above) — not columns on this model, so picked
+        // explicitly rather than spread.
         data: candidates.map((c, i) => ({
           jobId,
-          ...c,
+          videoTimestampSeconds: c.videoTimestampSeconds,
+          previousScoreText: c.previousScoreText,
+          scoreText: c.scoreText,
           guessedJerseyNumber: guesses[i]?.jerseyNumber ?? null,
           guessedStatType: guesses[i]?.statType ?? null,
           guessedPlayerId: guesses[i]?.playerId ?? null,
