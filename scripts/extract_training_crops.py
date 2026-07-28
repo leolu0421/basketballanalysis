@@ -15,6 +15,7 @@ beginning.
 
 Usage:
     python3 extract_training_crops.py <input_video> <output_dir> [--fps 1] [--max-crops 500] [--start 0]
+    python3 extract_training_crops.py <input_video> <output_dir> --team-color yellow
 """
 import argparse
 import glob
@@ -22,9 +23,36 @@ import os
 import re
 
 import cv2
+import numpy as np
 from ultralytics import YOLO
 
 PERSON_CLASS_ID = 0
+
+# Rough HSV heuristics (OpenCV hue range 0-179) for common jersey colors —
+# these are approximate and depend on the actual jersey shade/video
+# lighting, so --color-threshold is there to loosen/tighten the match if a
+# team's true color keeps getting filtered out (or too much of the other
+# team keeps getting through).
+JERSEY_COLOR_RANGES = {
+    "yellow": [((20, 60, 60), (35, 255, 255))],
+    "orange": [((8, 60, 60), (20, 255, 255))],
+    "red": [((0, 60, 60), (10, 255, 255)), ((170, 60, 60), (179, 255, 255))],
+    "green": [((40, 60, 40), (85, 255, 255))],
+    "blue": [((95, 60, 40), (130, 255, 255))],
+    "purple": [((130, 40, 40), (160, 255, 255))],
+    "white": [((0, 0, 170), (179, 40, 255))],
+    "black": [((0, 0, 0), (179, 255, 60))],
+}
+
+
+def matches_jersey_color(crop, color_name, threshold):
+    ranges = JERSEY_COLOR_RANGES[color_name]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    for lower, upper in ranges:
+        mask |= cv2.inRange(hsv, np.array(lower), np.array(upper))
+    fraction = float(np.count_nonzero(mask)) / mask.size
+    return fraction >= threshold
 
 
 def next_start_index(output_dir):
@@ -47,6 +75,18 @@ def main():
     parser.add_argument("--max-crops", type=int, default=500, help="Stop after this many NEW crops")
     parser.add_argument("--start", type=float, default=0.0, help="Video time (seconds) to start sampling from")
     parser.add_argument("--model", default="yolov8n.pt")
+    parser.add_argument(
+        "--team-color",
+        choices=sorted(JERSEY_COLOR_RANGES),
+        help="Only keep crops whose dominant color roughly matches this jersey color "
+        "(skips the other team automatically instead of you sorting them out by hand)",
+    )
+    parser.add_argument(
+        "--color-threshold",
+        type=float,
+        default=0.15,
+        help="Fraction of a crop's pixels that must match --team-color to keep it (0-1)",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -89,6 +129,8 @@ def main():
                 crop = frame[cy1:cy2, cx1:cx2]
                 if crop.shape[0] < 20 or crop.shape[1] < 20:
                     continue  # too small to be a useful training example
+                if args.team_color and not matches_jersey_color(crop, args.team_color, args.color_threshold):
+                    continue
                 path = os.path.join(args.output_dir, f"crop_{next_index:05d}.jpg")
                 cv2.imwrite(path, crop)
                 next_index += 1

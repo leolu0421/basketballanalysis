@@ -294,16 +294,25 @@ team or year. The number-to-player mapping (e.g. "#4 is Harper this
 season") is resolved separately, live, from your team's current roster
 in the database every time a video is analyzed — it already handles
 roster changes automatically and was never something you needed to
-train. So label every readable number you see, including opponents' —
-that variety makes the digit-reader more robust, and the same trained
-model keeps working next season and against new opponents without
-retraining, which is the "set it up once" behavior you're after.
+train. Labeling every readable number you see, including opponents',
+gives the digit-reader the most variety — but if you'd rather only
+label your own team for now (skipping opponents entirely is fine too;
+the same trained model keeps working next season and against new
+opponents without retraining either way, which is the "set it up once"
+behavior you're after), see `--team-color` below.
 
 1. **`extract_training_crops.py <video> <output_dir>`** — pulls
    individual person crops out of a game video (own footage, any
    source) at a sample rate (`--fps`, default 1/sec), up to
    `--max-crops` (default 500). Run it against a few different games so
-   the crops cover different lighting/angles/opponents.
+   the crops cover different lighting/angles/opponents. Pass
+   `--team-color yellow` (or `orange`/`red`/`green`/`blue`/`purple`/
+   `white`/`black`) to only keep crops that roughly match one team's
+   jersey color, skipping the other team automatically instead of you
+   sorting them out by hand during labeling — it's a rough HSV color
+   heuristic, not a trained model, so tune `--color-threshold` (default
+   0.15) if it's letting too much of the other team through or
+   filtering out your own team too.
 2. **`label_crops.py <crops_dir>`** — starts a local web page
    (`http://localhost:8765`) showing one crop at a time; type whatever
    jersey number is visible and hit save, or mark "can't read it" if it
