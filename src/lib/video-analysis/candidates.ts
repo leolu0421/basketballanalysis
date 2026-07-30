@@ -52,30 +52,56 @@ function parseScorePair(text: string): [number, number] | null {
  * for every point where the visible score text changed, with the timestamp
  * approximated as the midpoint between the last old-score read and the
  * first new-score read.
+ *
+ * Confirmed in production: a single misread frame (Claude vision reading
+ * "21" when the board still said "19") produced a candidate that looked
+ * like a perfectly plausible 2-point basket — isPlausibleScoreDelta can't
+ * catch this, since a wrong digit can land just as plausibly as a real one.
+ * To guard against a one-off misread, a new score isn't accepted until a
+ * SECOND, later read confirms the same value; a reading that never
+ * recurs is treated as a blip and dropped rather than turned into a
+ * candidate. This trades away catching a genuinely final, never-reconfirmed
+ * score change (e.g. the last basket before the board goes obscured for
+ * good) in exchange for not generating spurious, wrongly-attributed
+ * candidates from transient OCR errors — the better trade here since a
+ * coach can always log a missed basket manually, but a wrong AI guess
+ * actively misleads.
  */
 export function buildScoreCandidates(
   reads: FrameRead[],
   frameIntervalSeconds: number
 ): ScoreCandidate[] {
-  const sorted = [...reads].sort((a, b) => a.frameIndex - b.frameIndex);
+  const sorted = [...reads]
+    .filter((r) => r.scoreVisible && r.scoreText)
+    .sort((a, b) => a.frameIndex - b.frameIndex) as (FrameRead & { scoreText: string })[];
   const candidates: ScoreCandidate[] = [];
-  let lastKnown: { index: number; scoreText: string } | null = null;
+  if (sorted.length === 0) return candidates;
 
-  for (const read of sorted) {
-    if (!read.scoreVisible || !read.scoreText) continue;
+  let confirmed = { index: sorted[0].frameIndex, scoreText: sorted[0].scoreText };
+  let pending: { index: number; scoreText: string } | null = null;
 
-    if (lastKnown && read.scoreText !== lastKnown.scoreText) {
-      const midpointIndex = (lastKnown.index + read.frameIndex) / 2;
-      candidates.push({
-        videoTimestampSeconds: midpointIndex * frameIntervalSeconds,
-        previousScoreText: lastKnown.scoreText,
-        scoreText: read.scoreText,
-        gapStartSeconds: lastKnown.index * frameIntervalSeconds,
-        gapEndSeconds: read.frameIndex * frameIntervalSeconds,
-      });
+  for (let i = 1; i < sorted.length; i++) {
+    const read = sorted[i];
+
+    if (read.scoreText === confirmed.scoreText) {
+      pending = null; // back to the known-good score — any pending change was a blip
+      continue;
     }
 
-    lastKnown = { index: read.frameIndex, scoreText: read.scoreText };
+    if (pending && read.scoreText === pending.scoreText) {
+      const midpointIndex = (confirmed.index + pending.index) / 2;
+      candidates.push({
+        videoTimestampSeconds: midpointIndex * frameIntervalSeconds,
+        previousScoreText: confirmed.scoreText,
+        scoreText: pending.scoreText,
+        gapStartSeconds: confirmed.index * frameIntervalSeconds,
+        gapEndSeconds: pending.index * frameIntervalSeconds,
+      });
+      confirmed = { index: read.frameIndex, scoreText: read.scoreText };
+      pending = null;
+    } else {
+      pending = { index: read.frameIndex, scoreText: read.scoreText };
+    }
   }
 
   return candidates;
