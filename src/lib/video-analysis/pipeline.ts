@@ -11,7 +11,7 @@ import {
   type CandidateToGuess,
   type TrackToGuess,
 } from "./vision";
-import { buildScoreCandidates, type ScoreCandidate } from "./candidates";
+import { buildScoreCandidates, isPlausibleScoreDelta, type ScoreCandidate } from "./candidates";
 
 const FRAME_INTERVAL_SECONDS = 15;
 const FRAMES_PER_VISION_CALL = 10;
@@ -264,12 +264,22 @@ async function guessCandidatePlayers(
     // candidates.
     await updateJob(jobId, { progress: Math.min(99, 55 + Math.round((index / candidates.length) * 44)) });
 
+    const candidate = candidates[index];
+
+    // A candidate whose score delta isn't a plausible single basket (both
+    // sides changed, or one side jumped by more than 3) has no single
+    // scoring player to attribute — skip straight to leaving it unguessed
+    // (falls back to manual entry in the UI) rather than spend a
+    // tracking/vision call guessing an answer that can't be right.
+    if (!isPlausibleScoreDelta(candidate.previousScoreText, candidate.scoreText)) {
+      continue;
+    }
+
     if (!trackingAvailable) {
       fallbackIndices.push(index);
       continue;
     }
 
-    const candidate = candidates[index];
     try {
       const tracks = await trackCandidate(
         videoPath,
