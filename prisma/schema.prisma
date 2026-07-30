@@ -110,17 +110,26 @@ model VideoAnalysisJob {
 }
 
 model VideoAnalysisCandidate {
-  id                    String           @id @default(cuid())
-  jobId                 String
-  job                   VideoAnalysisJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  videoTimestampSeconds Float
-  previousScoreText     String?
-  scoreText             String?
-  guessedJerseyNumber   String?
-  guessedStatType       String?
-  guessedPlayerId       String?
-  dismissed             Boolean          @default(false)
-  createdAt             DateTime         @default(now())
+  id                     String           @id @default(cuid())
+  jobId                  String
+  job                    VideoAnalysisJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  // The localized scoring timestamp when event localization succeeded,
+  // otherwise the scoreboard-gap midpoint (see localization.ts / pipeline.ts).
+  videoTimestampSeconds  Float
+  previousScoreText      String?
+  scoreText              String?
+  // Original scoreboard-change search window this candidate came from —
+  // kept even after localization narrows videoTimestampSeconds down, so the
+  // wider window is never lost.
+  gapStartSeconds        Float?
+  gapEndSeconds          Float?
+  localizationConfidence Float?
+  localizationMethod     String?
+  guessedJerseyNumber    String?
+  guessedStatType        String?
+  guessedPlayerId        String?
+  dismissed              Boolean          @default(false)
+  createdAt              DateTime         @default(now())
 }
 
 model StatEvent {

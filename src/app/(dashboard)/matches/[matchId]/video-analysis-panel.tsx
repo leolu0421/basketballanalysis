@@ -21,7 +21,13 @@ type Candidate = {
   guessedJerseyNumber: string | null;
   guessedStatType: string | null;
   guessedPlayerId: string | null;
+  localizationConfidence: number | null;
+  localizationMethod: string | null;
 };
+
+// Start playback a little before the localized moment so the coach sees
+// the play develop, not just the instant the AI picked.
+const SEEK_LEAD_SECONDS = 3;
 
 type Job = {
   id: string;
@@ -142,7 +148,7 @@ function CandidateRow({
     <li className="rounded-lg bg-black/5 px-2 py-2 text-sm">
       <div className="flex items-center justify-between">
         <button
-          onClick={() => onSeek(candidate.videoTimestampSeconds)}
+          onClick={() => onSeek(Math.max(0, candidate.videoTimestampSeconds - SEEK_LEAD_SECONDS))}
           className="flex items-center gap-1 text-left font-medium text-navy hover:underline"
         >
           <span aria-hidden>▶</span>
@@ -153,6 +159,13 @@ function CandidateRow({
           Dismiss
         </button>
       </div>
+
+      {candidate.localizationMethod === "vision" && candidate.localizationConfidence != null && (
+        <p className="mt-0.5 text-[11px] text-black/40">
+          AI located scoring moment
+          {candidate.localizationConfidence < 0.5 ? " (low confidence)" : ""}
+        </p>
+      )}
 
       {!editing ? (
         <div className="mt-1.5 flex items-center justify-between gap-2">

@@ -43,6 +43,8 @@ type VideoAnalysisJob = {
     guessedJerseyNumber: string | null;
     guessedStatType: string | null;
     guessedPlayerId: string | null;
+    localizationConfidence: number | null;
+    localizationMethod: string | null;
   }[];
 } | null;
 

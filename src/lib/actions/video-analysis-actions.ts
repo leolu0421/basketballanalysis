@@ -7,6 +7,7 @@ import { requireTeam } from "@/lib/current-user";
 import { isAiConfigured } from "@/lib/ai/insights";
 import { runVideoAnalysisJob, type VideoSource } from "@/lib/video-analysis/pipeline";
 import { videoStoragePathFor } from "@/lib/video-storage";
+import { isDuplicateEvent } from "@/lib/video-analysis/duplicates";
 
 export type VideoAnalysisActionState = { error?: string } | undefined;
 
@@ -142,6 +143,23 @@ export async function confirmCandidateAction(
       where: { id: candidateId, job: { matchId } },
     });
     if (!candidate) return { error: "Suggestion not found" };
+
+    // Guards against confirming the same real basket twice — e.g. a
+    // double-click, or two separate candidates (localization vs. a manual
+    // log) both pointing at the same play.
+    const existingEvents = await prisma.statEvent.findMany({
+      where: { matchId, playerId: parsed.data.playerId, type: parsed.data.type },
+      select: { playerId: true, type: true, videoTimestampSeconds: true },
+    });
+    if (
+      isDuplicateEvent(existingEvents, {
+        playerId: parsed.data.playerId,
+        type: parsed.data.type,
+        videoTimestampSeconds: candidate.videoTimestampSeconds,
+      })
+    ) {
+      return { error: "This looks like a duplicate of an event already logged near this timestamp." };
+    }
 
     await prisma.$transaction([
       prisma.statEvent.create({

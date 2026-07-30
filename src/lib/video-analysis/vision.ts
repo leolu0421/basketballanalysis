@@ -17,6 +17,28 @@ export type FrameRead = z.infer<typeof FrameReadsSchema>["reads"][number];
 
 export type FrameToRead = { index: number; path: string; timestampSeconds: number };
 
+export type LocalizationCandidateFrame = {
+  timestampSeconds: number;
+  confidence: number;
+};
+
+export type EventLocalizationResult = {
+  localizedTimestampSeconds: number;
+  confidence: number;
+  reason: string;
+  method: "vision" | "fallback_midpoint";
+  // False when the localized frame doesn't clearly show whoever took the
+  // shot (e.g. only the ball/hoop is framed, or the shooter is off-screen)
+  // — downstream tracking should widen its search clip rather than trust a
+  // tight window around a frame that may not even contain the scorer.
+  shooterVisible: boolean;
+  // Up to 3 candidate frames (best first), so the pipeline can try player
+  // tracking around more than one guess at the actual moment and keep
+  // whichever yields a resolved player, instead of betting everything on a
+  // single frame pick.
+  topCandidates: LocalizationCandidateFrame[];
+};
+
 let client: Anthropic | null = null;
 function getClient() {
   if (!client) client = new Anthropic();
@@ -218,4 +240,115 @@ export async function guessCandidateFromTracks(
   }
 
   return response.parsed_output;
+}
+
+const LocalizationSchema = z.object({
+  candidates: z
+    .array(
+      z.object({
+        frameIndex: z.number().int(),
+        confidence: z.number().min(0).max(1),
+      })
+    )
+    .max(3),
+  shooterVisible: z.boolean(),
+  reason: z.string(),
+});
+
+const emptyLocalization = (reason: string): EventLocalizationResult => ({
+  localizedTimestampSeconds: 0,
+  confidence: 0,
+  reason,
+  method: "fallback_midpoint",
+  shooterVisible: false,
+  topCandidates: [],
+});
+
+/**
+ * Event localization: a scoreboard change only proves a basket happened
+ * somewhere in the search window (see localization.ts), not exactly when —
+ * the frame closest to the score-change sighting is frequently well after
+ * the real play, by which point possession has already moved on. This asks
+ * Claude to look at a denser sequence of frames from that window and pick
+ * the moment the ball left the shooter's hand (preferred — supports future
+ * release-point/shot-chart analytics), falling back to the moment the ball
+ * is closest to the hoop only when release itself isn't clear. It also
+ * reports whether the shooter is actually visible at that frame (so the
+ * caller knows whether a tight tracking window is safe, or needs widening)
+ * and up to 3 candidate frames, so the pipeline can try player tracking
+ * around more than one guess and keep whichever actually resolves a player,
+ * instead of betting everything on a single frame pick.
+ *
+ * Claude reports frameIndex values from the supplied set, not raw
+ * timestamps — that makes it structurally impossible for a result to land
+ * outside the frames it was actually shown, since the caller maps each
+ * index back to that frame's real timestamp rather than trusting an
+ * arbitrary number.
+ */
+export async function localizeScoringMoment(
+  frames: FrameToRead[],
+  candidate: { previousScoreText: string; scoreText: string }
+): Promise<EventLocalizationResult> {
+  if (frames.length === 0) return emptyLocalization("No frames available for localization");
+
+  const anthropic = getClient();
+
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; source: { type: "base64"; media_type: "image/jpeg"; data: string } }
+  > = [
+    {
+      type: "text",
+      text: `The on-screen scoreboard in this basketball game video changed from ${candidate.previousScoreText} to ${candidate.scoreText}, confirming a basket worth 1, 2, or 3 points was scored somewhere in the frames below (shown in chronological order, each labeled with its frameIndex). The scoreboard sighting itself is NOT reliable evidence of exactly when the basket happened — it can lag well behind the real play.
+
+Prefer identifying the frame immediately after the ball leaves the shooter's hand (the release point) over a frame showing the ball entering the hoop — release-point framing is more useful for future shot-location analysis. Only if you cannot confidently identify the release should you fall back to the frame where the ball is closest to entering or passing through the basket. Other supporting cues: the ball traveling through the air toward the rim, players transitioning away after the score, a referee signaling a made basket.
+
+Report up to 3 candidate frames (best first) that could be the scoring moment, each with the frameIndex (must be one of the frameIndex values given below) and a confidence from 0 to 1 — fewer than 3 (or none) is fine if you don't have that many plausible candidates. Also report shooterVisible: whether your top candidate frame clearly shows the player who took the shot (not just the ball/hoop, or the shooter off-screen/obscured) — set this false if you can't actually see who shot it even though you can tell roughly when it happened. Include a short overall reason.`,
+    },
+  ];
+
+  for (const frame of frames) {
+    content.push({ type: "text", text: `frameIndex=${frame.index} (t=${frame.timestampSeconds}s):` });
+    const data = (await readFile(frame.path)).toString("base64");
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: "image/jpeg", data },
+    });
+  }
+
+  const response = await anthropic.messages.parse({
+    model: "claude-opus-4-8",
+    max_tokens: 768,
+    messages: [{ role: "user", content }],
+    output_config: {
+      format: zodOutputFormat(LocalizationSchema),
+    },
+  });
+
+  if (!response.parsed_output) {
+    return emptyLocalization("Vision analysis did not return a valid structured response");
+  }
+
+  const { candidates, shooterVisible, reason } = response.parsed_output;
+
+  const topCandidates: LocalizationCandidateFrame[] = candidates
+    .map((c) => {
+      const matchedFrame = frames.find((f) => f.index === c.frameIndex);
+      return matchedFrame ? { timestampSeconds: matchedFrame.timestampSeconds, confidence: c.confidence } : null;
+    })
+    .filter((c): c is LocalizationCandidateFrame => c !== null)
+    .sort((a, b) => b.confidence - a.confidence);
+
+  if (topCandidates.length === 0) {
+    return { ...emptyLocalization(reason || "No frame had clear enough evidence"), shooterVisible };
+  }
+
+  return {
+    localizedTimestampSeconds: topCandidates[0].timestampSeconds,
+    confidence: topCandidates[0].confidence,
+    reason,
+    method: "vision",
+    shooterVisible,
+    topCandidates,
+  };
 }

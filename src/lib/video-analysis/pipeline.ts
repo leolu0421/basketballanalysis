@@ -7,11 +7,14 @@ import {
   readScoreboardBatch,
   guessCandidateStatsBatch,
   guessCandidateFromTracks,
+  localizeScoringMoment,
   type FrameRead,
   type CandidateToGuess,
   type TrackToGuess,
+  type EventLocalizationResult,
 } from "./vision";
 import { buildScoreCandidates, isPlausibleScoreDelta, type ScoreCandidate } from "./candidates";
+import { computeLocalizationWindow } from "./localization";
 
 const FRAME_INTERVAL_SECONDS = 15;
 const FRAMES_PER_VISION_CALL = 10;
@@ -19,6 +22,10 @@ const CANDIDATES_PER_GUESS_CALL = 4;
 const TRACK_CLIP_PADDING_SECONDS = 4;
 const MAX_TRACK_CLIP_DURATION_SECONDS = 45;
 const TRACK_SAMPLE_FPS = 5;
+const LOCALIZATION_SAMPLE_INTERVAL_SECONDS = 1;
+const LOCALIZED_CLIP_BEFORE_SECONDS = 5;
+const LOCALIZED_CLIP_AFTER_SECONDS = 2;
+const FFMPEG_LOCALIZATION_TIMEOUT_MS = 1 * 60 * 1000;
 const TRACK_SCRIPT_PATH = path.join(process.cwd(), "scripts", "track_players.py");
 const CLASSIFY_SCRIPT_PATH = path.join(process.cwd(), "scripts", "classify_jersey.py");
 const JERSEY_MODEL_DIR = path.join(process.cwd(), "models", "jersey");
@@ -158,36 +165,112 @@ function resolvePlayerId(
 }
 
 /**
- * Runs YOLO person detection + ByteTrack tracking (scripts/track_players.py)
- * on a short clip around a candidate's timestamp, returning cropped torso
- * images per tracked person — zoomed close-ups read jersey numbers far more
- * reliably than a wide-shot frame. Requires Python 3 + the deps in
- * requirements.txt on the host; throws if unavailable so the caller can fall
- * back to the wide-frame approach.
- *
- * Confirmed in production: a fixed +/-4s window around the candidate's
- * midpoint timestamp can completely miss the actual play whenever the
- * scoreboard was obscured for a while (camera pans away, replay, foul
- * review) — the real shot can be much closer to gapStartSeconds (last
- * confirmed old score) than to the midpoint, especially once the gap
- * between old and new scoreboard sightings spans multiple sample
- * intervals. The clip now covers the whole gap (plus a little padding),
- * capped so a single long stoppage doesn't blow up processing time.
+ * The full scoreboard-obscured gap, capped so a single long stoppage
+ * doesn't blow up processing time. Used as the tracking-clip window only
+ * when event localization (below) fails or isn't confident — otherwise the
+ * much tighter localized-timestamp window is used instead.
  */
-async function trackCandidate(
-  videoPath: string,
-  workDir: string,
-  index: number,
-  gapStartSeconds: number,
-  gapEndSeconds: number
-): Promise<TrackToGuess[]> {
+function gapBasedClipWindow(gapStartSeconds: number, gapEndSeconds: number): { start: number; duration: number } {
   const center = (gapStartSeconds + gapEndSeconds) / 2;
   const desiredDuration = Math.min(
     gapEndSeconds - gapStartSeconds + TRACK_CLIP_PADDING_SECONDS * 2,
     MAX_TRACK_CLIP_DURATION_SECONDS
   );
-  const clipStart = Math.max(0, center - desiredDuration / 2);
-  const clipDuration = desiredDuration;
+  return { start: Math.max(0, center - desiredDuration / 2), duration: desiredDuration };
+}
+
+/**
+ * Extracts frames densely sampled from a candidate's localization search
+ * window (see localization.ts), for localizeScoringMoment to inspect.
+ */
+async function extractLocalizationFrames(
+  videoPath: string,
+  workDir: string,
+  index: number,
+  window: { start: number; end: number }
+): Promise<{ index: number; path: string; timestampSeconds: number }[]> {
+  const framesDir = path.join(workDir, "localization", `candidate_${index}`);
+  await mkdir(framesDir, { recursive: true });
+  const duration = Math.max(0.1, window.end - window.start);
+
+  await run(
+    "ffmpeg",
+    [
+      "-ss",
+      String(window.start),
+      "-i",
+      videoPath,
+      "-t",
+      String(duration),
+      "-vf",
+      `fps=1/${LOCALIZATION_SAMPLE_INTERVAL_SECONDS}`,
+      "-q:v",
+      "5",
+      path.join(framesDir, "frame_%05d.jpg"),
+    ],
+    FFMPEG_LOCALIZATION_TIMEOUT_MS
+  );
+
+  const files = (await readdir(framesDir)).filter((f) => f.endsWith(".jpg")).sort();
+  return files.map((file, i) => ({
+    index: i,
+    path: path.join(framesDir, file),
+    timestampSeconds: window.start + i * LOCALIZATION_SAMPLE_INTERVAL_SECONDS,
+  }));
+}
+
+/**
+ * Event localization stage: narrows a scoreboard-change candidate's whole
+ * search gap down to the actual scoring frame, before any player/jersey
+ * guessing happens. Best-effort — any failure (no ffmpeg, no frames, vision
+ * call error) falls back to the gap's midpoint with confidence 0 rather
+ * than throwing, so a single candidate's localization trouble never stops
+ * the rest of the job.
+ */
+async function localizeCandidate(
+  videoPath: string,
+  workDir: string,
+  index: number,
+  candidate: { previousScoreText: string; scoreText: string; gapStartSeconds: number; gapEndSeconds: number }
+): Promise<EventLocalizationResult> {
+  const fallback: EventLocalizationResult = {
+    localizedTimestampSeconds: (candidate.gapStartSeconds + candidate.gapEndSeconds) / 2,
+    confidence: 0,
+    reason: "Localization unavailable — using gap midpoint",
+    method: "fallback_midpoint",
+    // Unknown whether the shooter is visible anywhere in the (much wider,
+    // unlocalized) gap — default to the safer assumption so the caller
+    // widens the tracking clip rather than trusting a tight window blind.
+    shooterVisible: false,
+    topCandidates: [],
+  };
+
+  try {
+    const window = computeLocalizationWindow(candidate.gapStartSeconds, candidate.gapEndSeconds);
+    const frames = await extractLocalizationFrames(videoPath, workDir, index, window);
+    if (frames.length === 0) return fallback;
+    return await localizeScoringMoment(frames, candidate);
+  } catch (err) {
+    console.error(`Event localization failed (candidate ${index}) — falling back to gap midpoint:`, err);
+    return fallback;
+  }
+}
+
+/**
+ * Runs YOLO person detection + ByteTrack tracking (scripts/track_players.py)
+ * on a short clip, returning cropped torso images per tracked person —
+ * zoomed close-ups read jersey numbers far more reliably than a wide-shot
+ * frame. Requires Python 3 + the deps in requirements.txt on the host;
+ * throws if unavailable so the caller can fall back to the wide-frame
+ * approach.
+ */
+async function trackCandidate(
+  videoPath: string,
+  workDir: string,
+  index: number,
+  clipStart: number,
+  clipDuration: number
+): Promise<TrackToGuess[]> {
   const clipPath = path.join(workDir, "clips", `candidate_${index}.mp4`);
   const trackOutDir = path.join(workDir, "tracks", `candidate_${index}`);
   await mkdir(path.dirname(clipPath), { recursive: true });
@@ -247,9 +330,13 @@ async function guessCandidatePlayers(
   framesDir: string,
   frameFiles: string[],
   roster: RosterPlayer[]
-): Promise<Array<CandidateGuessResult | undefined>> {
+): Promise<{
+  results: Array<CandidateGuessResult | undefined>;
+  localizations: Array<EventLocalizationResult | undefined>;
+}> {
   const results: Array<CandidateGuessResult | undefined> = new Array(candidates.length).fill(undefined);
-  if (roster.length === 0) return results;
+  const localizations: Array<EventLocalizationResult | undefined> = new Array(candidates.length).fill(undefined);
+  if (roster.length === 0) return { results, localizations };
 
   const useLocalModel = await hasTrainedJerseyModel();
 
@@ -265,13 +352,19 @@ async function guessCandidatePlayers(
     await updateJob(jobId, { progress: Math.min(99, 55 + Math.round((index / candidates.length) * 44)) });
 
     const candidate = candidates[index];
+    const oldMidpoint = (candidate.gapStartSeconds + candidate.gapEndSeconds) / 2;
 
     // A candidate whose score delta isn't a plausible single basket (both
     // sides changed, or one side jumped by more than 3) has no single
-    // scoring player to attribute — skip straight to leaving it unguessed
-    // (falls back to manual entry in the UI) rather than spend a
-    // tracking/vision call guessing an answer that can't be right.
+    // scoring player to attribute, and no single scoring moment to localize
+    // either — skip straight to leaving it unguessed (falls back to manual
+    // entry in the UI, using the plain gap midpoint) rather than spend a
+    // localization/tracking/vision call on an answer that can't be right.
     if (!isPlausibleScoreDelta(candidate.previousScoreText, candidate.scoreText)) {
+      console.log(
+        `[video-analysis] candidate ${index}: ${candidate.previousScoreText} -> ${candidate.scoreText}, ` +
+          `gap ${candidate.gapStartSeconds}s-${candidate.gapEndSeconds}s, skipped (implausible delta)`
+      );
       continue;
     }
 
@@ -281,35 +374,70 @@ async function guessCandidatePlayers(
     }
 
     try {
-      const tracks = await trackCandidate(
-        videoPath,
-        workDir,
-        index,
-        candidate.gapStartSeconds,
-        candidate.gapEndSeconds
-      );
-      const guess = await guessCandidateFromTracks(
-        { previousScoreText: candidate.previousScoreText, scoreText: candidate.scoreText },
-        tracks,
-        roster
-      );
+      const localization = await localizeCandidate(videoPath, workDir, index, candidate);
+      localizations[index] = localization;
 
-      let jerseyNumber = guess.jerseyNumber;
-      if (useLocalModel) {
-        const allCrops = tracks.flatMap((t) => t.crops);
-        const predictions = await classifyCropsLocally(allCrops);
-        const best = predictions
-          ?.filter((p) => p.confidence >= LOCAL_MODEL_CONFIDENCE_THRESHOLD)
-          .filter((p) => resolvePlayerId(p.label, roster) !== null)
-          .sort((a, b) => b.confidence - a.confidence)[0];
-        if (best) jerseyNumber = best.label;
+      // Try each candidate frame (best-confidence first) in turn, stopping
+      // as soon as one resolves to a roster player — this keeps the common
+      // case (top candidate just works) at the same cost as before, while
+      // still falling through to the next-best guess on harder candidates
+      // instead of betting everything on a single frame pick. If the
+      // shooter isn't visible at the localized frame, every attempt uses
+      // the wider gap-based window instead of a tight one, since a tight
+      // window anchored on a frame that doesn't even show the scorer isn't
+      // worth trusting.
+      const attempts =
+        localization.method === "vision" && localization.topCandidates.length > 0
+          ? localization.topCandidates
+          : [{ timestampSeconds: localization.localizedTimestampSeconds, confidence: localization.confidence }];
+
+      let chosen: CandidateGuessResult | undefined;
+      let chosenWindow = gapBasedClipWindow(candidate.gapStartSeconds, candidate.gapEndSeconds);
+      const attemptsLogged: string[] = [];
+
+      for (const attempt of attempts) {
+        const clipWindow = localization.shooterVisible
+          ? {
+              start: Math.max(0, attempt.timestampSeconds - LOCALIZED_CLIP_BEFORE_SECONDS),
+              duration: LOCALIZED_CLIP_BEFORE_SECONDS + LOCALIZED_CLIP_AFTER_SECONDS,
+            }
+          : gapBasedClipWindow(candidate.gapStartSeconds, candidate.gapEndSeconds);
+
+        const tracks = await trackCandidate(videoPath, workDir, index, clipWindow.start, clipWindow.duration);
+        const guess = await guessCandidateFromTracks(
+          { previousScoreText: candidate.previousScoreText, scoreText: candidate.scoreText },
+          tracks,
+          roster
+        );
+
+        let jerseyNumber = guess.jerseyNumber;
+        if (useLocalModel) {
+          const allCrops = tracks.flatMap((t) => t.crops);
+          const predictions = await classifyCropsLocally(allCrops);
+          const best = predictions
+            ?.filter((p) => p.confidence >= LOCAL_MODEL_CONFIDENCE_THRESHOLD)
+            .filter((p) => resolvePlayerId(p.label, roster) !== null)
+            .sort((a, b) => b.confidence - a.confidence)[0];
+          if (best) jerseyNumber = best.label;
+        }
+
+        const playerId = resolvePlayerId(jerseyNumber, roster);
+        attemptsLogged.push(`t=${attempt.timestampSeconds}s(conf ${attempt.confidence})->#${jerseyNumber ?? "?"}/${playerId ?? "unresolved"}`);
+        chosen = { jerseyNumber, statType: guess.statType, playerId };
+        chosenWindow = clipWindow;
+        if (playerId !== null) break; // good enough — no need to try the remaining candidates
       }
 
-      results[index] = {
-        jerseyNumber,
-        statType: guess.statType,
-        playerId: resolvePlayerId(jerseyNumber, roster),
-      };
+      results[index] = chosen;
+
+      console.log(
+        `[video-analysis] candidate ${index}: ${candidate.previousScoreText} -> ${candidate.scoreText}, ` +
+          `gap ${candidate.gapStartSeconds}s-${candidate.gapEndSeconds}s (old midpoint ${oldMidpoint}s), ` +
+          `localized ${localization.localizedTimestampSeconds}s (confidence ${localization.confidence}, ${localization.method}, shooterVisible=${localization.shooterVisible}), ` +
+          `attempts: [${attemptsLogged.join(", ")}], ` +
+          `tracking clip ${chosenWindow.start}s-${chosenWindow.start + chosenWindow.duration}s, ` +
+          `guessed jersey #${chosen?.jerseyNumber ?? "?"} -> player ${chosen?.playerId ?? "unresolved"}, stat ${chosen?.statType ?? "?"}`
+      );
     } catch (err) {
       console.error(
         `Tracking-based guess failed (candidate ${index}) — falling back to wide-frame guessing for remaining candidates:`,
@@ -343,11 +471,18 @@ async function guessCandidatePlayers(
       try {
         const guesses = await guessCandidateStatsBatch(batch, roster);
         for (const guess of guesses) {
+          const playerId = resolvePlayerId(guess.jerseyNumber, roster);
           results[guess.candidateIndex] = {
             jerseyNumber: guess.jerseyNumber,
             statType: guess.statType,
-            playerId: resolvePlayerId(guess.jerseyNumber, roster),
+            playerId,
           };
+          const c = candidates[guess.candidateIndex];
+          console.log(
+            `[video-analysis] candidate ${guess.candidateIndex}: ${c.previousScoreText} -> ${c.scoreText}, ` +
+              `gap ${c.gapStartSeconds}s-${c.gapEndSeconds}s, wide-frame fallback (no localization), ` +
+              `guessed jersey #${guess.jerseyNumber ?? "?"} -> player ${playerId ?? "unresolved"}, stat ${guess.statType ?? "?"}`
+          );
         }
       } catch (err) {
         console.error("guessCandidateStatsBatch failed for a batch:", err);
@@ -355,7 +490,7 @@ async function guessCandidatePlayers(
     }
   }
 
-  return results;
+  return { results, localizations };
 }
 
 /**
@@ -465,7 +600,7 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
 
     if (candidates.length > 0) {
       await updateJob(jobId, { status: "MATCHING", progress: 55 });
-      const guesses = await guessCandidatePlayers(
+      const { results: guesses, localizations } = await guessCandidatePlayers(
         jobId,
         candidates,
         videoPath,
@@ -476,14 +611,19 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
       );
 
       await prisma.videoAnalysisCandidate.createMany({
-        // gapStartSeconds/gapEndSeconds are in-memory only (sizing the
-        // tracking clip above) — not columns on this model, so picked
-        // explicitly rather than spread.
         data: candidates.map((c, i) => ({
           jobId,
-          videoTimestampSeconds: c.videoTimestampSeconds,
+          // videoTimestampSeconds is the localized timestamp when
+          // localization succeeded, otherwise the original gap midpoint —
+          // gapStartSeconds/gapEndSeconds are kept alongside it so the
+          // original search window is never lost even once localized.
+          videoTimestampSeconds: localizations[i]?.localizedTimestampSeconds ?? c.videoTimestampSeconds,
           previousScoreText: c.previousScoreText,
           scoreText: c.scoreText,
+          gapStartSeconds: c.gapStartSeconds,
+          gapEndSeconds: c.gapEndSeconds,
+          localizationConfidence: localizations[i]?.confidence ?? null,
+          localizationMethod: localizations[i]?.method ?? null,
           guessedJerseyNumber: guesses[i]?.jerseyNumber ?? null,
           guessedStatType: guesses[i]?.statType ?? null,
           guessedPlayerId: guesses[i]?.playerId ?? null,
