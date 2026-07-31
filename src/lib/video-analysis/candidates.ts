@@ -67,13 +67,21 @@ function parseScorePair(text: string): [number, number] | null {
  * coach can always log a missed basket manually, but a wrong AI guess
  * actively misleads.
  */
+export type BuildCandidatesStats = {
+  visibleReads: number;
+  rawChangesDetected: number;
+  discardedUnconfirmed: number;
+};
+
 export function buildScoreCandidates(
   reads: FrameRead[],
-  frameIntervalSeconds: number
+  frameIntervalSeconds: number,
+  stats?: BuildCandidatesStats
 ): ScoreCandidate[] {
   const sorted = [...reads]
     .filter((r) => r.scoreVisible && r.scoreText)
     .sort((a, b) => a.frameIndex - b.frameIndex) as (FrameRead & { scoreText: string })[];
+  if (stats) stats.visibleReads = sorted.length;
   const candidates: ScoreCandidate[] = [];
   if (sorted.length === 0) return candidates;
 
@@ -84,8 +92,23 @@ export function buildScoreCandidates(
     const read = sorted[i];
 
     if (read.scoreText === confirmed.scoreText) {
+      if (pending) {
+        if (stats) stats.discardedUnconfirmed++;
+        console.log(
+          `[video-analysis] discarded unconfirmed reading "${pending.scoreText}" at ~${pending.index * frameIntervalSeconds}s (reverted to "${confirmed.scoreText}")`
+        );
+      }
       pending = null; // back to the known-good score — any pending change was a blip
       continue;
+    }
+
+    if (stats) stats.rawChangesDetected++;
+
+    if (pending && read.scoreText !== pending.scoreText) {
+      if (stats) stats.discardedUnconfirmed++;
+      console.log(
+        `[video-analysis] discarded unconfirmed reading "${pending.scoreText}" at ~${pending.index * frameIntervalSeconds}s (next read was "${read.scoreText}", not a repeat)`
+      );
     }
 
     if (pending && read.scoreText === pending.scoreText) {
@@ -102,6 +125,13 @@ export function buildScoreCandidates(
     } else {
       pending = { index: read.frameIndex, scoreText: read.scoreText };
     }
+  }
+
+  if (pending) {
+    if (stats) stats.discardedUnconfirmed++;
+    console.log(
+      `[video-analysis] discarded unconfirmed reading "${pending.scoreText}" at ~${pending.index * frameIntervalSeconds}s (never re-confirmed before scoreboard reads ran out)`
+    );
   }
 
   return candidates;

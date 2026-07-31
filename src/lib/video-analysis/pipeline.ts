@@ -13,7 +13,12 @@ import {
   type TrackToGuess,
   type EventLocalizationResult,
 } from "./vision";
-import { buildScoreCandidates, isPlausibleScoreDelta, type ScoreCandidate } from "./candidates";
+import {
+  buildScoreCandidates,
+  isPlausibleScoreDelta,
+  type ScoreCandidate,
+  type BuildCandidatesStats,
+} from "./candidates";
 import { computeLocalizationWindow } from "./localization";
 
 const FRAME_INTERVAL_SECONDS = 15;
@@ -596,7 +601,8 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
       await updateJob(jobId, { progress: Math.min(pct, 55) });
     }
 
-    const candidates = buildScoreCandidates(allReads, FRAME_INTERVAL_SECONDS);
+    const candidateStats: BuildCandidatesStats = { visibleReads: 0, rawChangesDetected: 0, discardedUnconfirmed: 0 };
+    const candidates = buildScoreCandidates(allReads, FRAME_INTERVAL_SECONDS, candidateStats);
 
     if (candidates.length > 0) {
       await updateJob(jobId, { status: "MATCHING", progress: 55 });
@@ -629,6 +635,30 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
           guessedPlayerId: guesses[i]?.playerId ?? null,
         })),
       });
+
+      // Answers "why did the candidate count change" without having to dig
+      // through per-candidate log lines — every candidate that's generated
+      // here IS what gets shown in the UI (nothing downstream filters the
+      // list further), so candidatesGenerated == candidatesShown always.
+      const implausibleCount = candidates.filter(
+        (c) => !isPlausibleScoreDelta(c.previousScoreText, c.scoreText)
+      ).length;
+      const localizedCount = localizations.filter((l) => l?.method === "vision").length;
+      console.log(
+        `[video-analysis] SUMMARY: ${candidateStats.visibleReads} scoreboard-visible reads, ` +
+          `${candidateStats.rawChangesDetected} raw score changes detected, ` +
+          `${candidateStats.discardedUnconfirmed} discarded as unconfirmed (likely misreads), ` +
+          `${candidates.length} candidates generated (= shown in UI), ` +
+          `${implausibleCount} of those skipped for guessing (implausible delta), ` +
+          `${localizedCount} successfully localized via vision`
+      );
+    } else {
+      console.log(
+        `[video-analysis] SUMMARY: ${candidateStats.visibleReads} scoreboard-visible reads, ` +
+          `${candidateStats.rawChangesDetected} raw score changes detected, ` +
+          `${candidateStats.discardedUnconfirmed} discarded as unconfirmed (likely misreads), ` +
+          `0 candidates generated`
+      );
     }
 
     await updateJob(jobId, { status: "DONE", progress: 100 });
