@@ -159,6 +159,14 @@ model AnalysisSummary {
   totalProcessingSeconds         Float?
   extraMetrics                   Json?
   createdAt                      DateTime         @default(now())
+  // Deprecated, unused by app code — replaced by the more precise
+  // localizationSuccess/Fallback/Failed breakdown above. Kept here only so
+  // `prisma db push` never needs to DROP them (a data-loss operation it
+  // refuses to do non-interactively, which crash-looped the whole app on
+  // deploy once these columns already had data). Fine to actually drop
+  // later via a deliberate, reviewed migration -- not from a routine push.
+  localizedSuccessfully          Int?
+  localizationFallbackCount      Int?
 }
 
 model VideoAnalysisCandidate {
