@@ -139,17 +139,20 @@ model AnalysisSummary {
   // failure -- not stored separately, but always ==
   // suggestedMomentsGenerated - localizationAttempts) always accounts for
   // every candidate. localizationAttempts == success + fallback + failed.
-  localizationAttempts           Int
+  // Defaulted to 0 (not semantically meaningful, just lets `prisma db push`
+  // backfill existing rows from before this breakdown existed without
+  // aborting -- new rows always get real computed values).
+  localizationAttempts           Int              @default(0)
   // Localization found a real scoring frame via Claude vision.
-  localizationSuccess            Int
+  localizationSuccess            Int              @default(0)
   // Localization ran to completion but found no usable evidence (not an
   // error) -- extraction produced zero frames, or Claude found nothing
   // clear enough.
-  localizationFallback           Int
+  localizationFallback           Int              @default(0)
   // Localization threw an actual exception (ffmpeg failure/timeout, an
   // API error) -- distinct from localizationFallback, which is an
   // expected "tried, nothing there" outcome, not a bug.
-  localizationFailed             Int
+  localizationFailed             Int              @default(0)
   // Average confidence across localizationAttempts (success attempts
   // report a real confidence; fallback/failed attempts report 0).
   averageLocalizationConfidence  Float?
