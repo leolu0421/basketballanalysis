@@ -503,3 +503,25 @@ the exact race (it likely needs a real HTTP-level abort, not just a web
 error's signature rather than one confirmed to eliminate it — worth
 checking the deploy logs again after some real usage to confirm it's
 actually gone.
+
+## AI pipeline evaluation (internal)
+
+Every completed video-analysis job writes an `AnalysisSummary` row
+(git commit, score changes detected, candidates generated, localization
+success/fallback counts, average confidence, total processing time) —
+purely for judging whether a pipeline change actually helped, not shown
+to coaches. View it at `/eval` (behind normal team auth, just not linked
+from the main nav) — sortable by date, filterable to benchmark matches,
+with a simple side-by-side comparison of any two runs at `/eval/compare`.
+
+Mark a match as a **benchmark match** from its row on `/eval` to re-run
+the same game against future pipeline versions — `deleteMatchAction`
+refuses to delete a benchmark match until it's unmarked first, so a
+comparison baseline can't be lost by accident.
+
+Deliberately deferred for now (per-suggestion reviewer scoring,
+precision/recall, and formal AI/model version tracking beyond the git
+commit) — not worth the ongoing manual-labeling effort until there's an
+actual cadence of comparisons to justify it. `AnalysisSummary.extraMetrics`
+(a JSON column) exists so new metrics can be added later without a schema
+migration.

@@ -61,9 +61,25 @@ export async function createMatchAction(
 
 export async function deleteMatchAction(matchId: string) {
   const { team } = await requireTeam();
+  const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
+  if (!match) redirect("/matches");
+  if (match.isBenchmark) {
+    // Benchmark matches back AI-pipeline evaluation comparisons (see
+    // AnalysisSummary) — require explicitly un-marking one on the /eval
+    // page before it can be deleted, so it's never lost by accident.
+    console.warn(`deleteMatchAction refused: ${matchId} is a benchmark match`);
+    redirect(`/matches/${matchId}`);
+  }
   await prisma.match.deleteMany({ where: { id: matchId, teamId: team.id } });
   revalidatePath("/matches");
   redirect("/matches");
+}
+
+export async function setBenchmarkMatchAction(matchId: string, isBenchmark: boolean) {
+  const { team } = await requireTeam();
+  await prisma.match.updateMany({ where: { id: matchId, teamId: team.id }, data: { isBenchmark } });
+  revalidatePath("/matches");
+  revalidatePath("/eval");
 }
 
 const scoreSchema = z.object({

@@ -604,6 +604,10 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
     const candidateStats: BuildCandidatesStats = { visibleReads: 0, rawChangesDetected: 0, discardedUnconfirmed: 0 };
     const candidates = buildScoreCandidates(allReads, FRAME_INTERVAL_SECONDS, candidateStats);
 
+    let localizedCount = 0;
+    let fallbackCount = 0;
+    let averageLocalizationConfidence: number | null = null;
+
     if (candidates.length > 0) {
       await updateJob(jobId, { status: "MATCHING", progress: 55 });
       const { results: guesses, localizations } = await guessCandidatePlayers(
@@ -643,14 +647,19 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
       const implausibleCount = candidates.filter(
         (c) => !isPlausibleScoreDelta(c.previousScoreText, c.scoreText)
       ).length;
-      const localizedCount = localizations.filter((l) => l?.method === "vision").length;
+      const attempted = localizations.filter((l): l is EventLocalizationResult => l != null);
+      localizedCount = attempted.filter((l) => l.method === "vision").length;
+      fallbackCount = attempted.filter((l) => l.method === "fallback_midpoint").length;
+      averageLocalizationConfidence =
+        attempted.length > 0 ? attempted.reduce((sum, l) => sum + l.confidence, 0) / attempted.length : null;
+
       console.log(
         `[video-analysis] SUMMARY: ${candidateStats.visibleReads} scoreboard-visible reads, ` +
           `${candidateStats.rawChangesDetected} raw score changes detected, ` +
           `${candidateStats.discardedUnconfirmed} discarded as unconfirmed (likely misreads), ` +
           `${candidates.length} candidates generated (= shown in UI), ` +
           `${implausibleCount} of those skipped for guessing (implausible delta), ` +
-          `${localizedCount} successfully localized via vision`
+          `${localizedCount} successfully localized via vision, ${fallbackCount} fell back to gap midpoint`
       );
     } else {
       console.log(
@@ -659,6 +668,27 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
           `${candidateStats.discardedUnconfirmed} discarded as unconfirmed (likely misreads), ` +
           `0 candidates generated`
       );
+    }
+
+    // Internal QA record — see AnalysisSummary in schema.prisma. Best-effort:
+    // a failure here shouldn't fail the whole analysis job, since the coach-
+    // facing candidates are already saved by this point.
+    try {
+      await prisma.analysisSummary.create({
+        data: {
+          jobId,
+          matchId: job.matchId,
+          gitCommitHash: process.env.RAILWAY_GIT_COMMIT_SHA ?? null,
+          scoreChangesDetected: candidateStats.rawChangesDetected,
+          suggestedMomentsGenerated: candidates.length,
+          localizedSuccessfully: localizedCount,
+          localizationFallbackCount: fallbackCount,
+          averageLocalizationConfidence,
+          totalProcessingSeconds: (Date.now() - job.createdAt.getTime()) / 1000,
+        },
+      });
+    } catch (err) {
+      console.error("Failed to record AnalysisSummary:", err);
     }
 
     await updateJob(jobId, { status: "DONE", progress: 100 });
