@@ -128,10 +128,30 @@ model AnalysisSummary {
   match                          Match            @relation(fields: [matchId], references: [id], onDelete: Cascade)
   gitCommitHash                  String?
   analyzedAt                     DateTime         @default(now())
+  // Raw scoreboard-text changes seen before the two-read confirmation
+  // filter (see candidates.ts) -- always >= suggestedMomentsGenerated.
   scoreChangesDetected           Int
+  // Confirmed candidates after filtering -- exactly what's shown as
+  // "Suggested moments" in the coach-facing UI.
   suggestedMomentsGenerated      Int
-  localizedSuccessfully          Int
-  localizationFallbackCount      Int
+  // localizationAttempts + skipped (implausible-delta candidates, or ones
+  // routed to the legacy wide-frame fallback after an earlier tracking
+  // failure -- not stored separately, but always ==
+  // suggestedMomentsGenerated - localizationAttempts) always accounts for
+  // every candidate. localizationAttempts == success + fallback + failed.
+  localizationAttempts           Int
+  // Localization found a real scoring frame via Claude vision.
+  localizationSuccess            Int
+  // Localization ran to completion but found no usable evidence (not an
+  // error) -- extraction produced zero frames, or Claude found nothing
+  // clear enough.
+  localizationFallback           Int
+  // Localization threw an actual exception (ffmpeg failure/timeout, an
+  // API error) -- distinct from localizationFallback, which is an
+  // expected "tried, nothing there" outcome, not a bug.
+  localizationFailed             Int
+  // Average confidence across localizationAttempts (success attempts
+  // report a real confidence; fallback/failed attempts report 0).
   averageLocalizationConfidence  Float?
   totalProcessingSeconds         Float?
   extraMetrics                   Json?

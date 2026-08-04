@@ -26,7 +26,16 @@ export type EventLocalizationResult = {
   localizedTimestampSeconds: number;
   confidence: number;
   reason: string;
-  method: "vision" | "fallback_midpoint";
+  // "vision": Claude identified at least one candidate frame.
+  // "fallback_no_evidence": localization ran to completion (no exception)
+  // but found nothing usable — extraction produced zero frames, Claude's
+  // response didn't parse, or it explicitly reported no clear evidence.
+  // "fallback_error": an exception was thrown somewhere in the attempt
+  // (ffmpeg failure/timeout, Claude API error, etc.) — see pipeline.ts's
+  // console.error for the actual error. Kept distinct from
+  // fallback_no_evidence so evaluation metrics don't conflate "tried,
+  // found nothing" with "something actually broke."
+  method: "vision" | "fallback_no_evidence" | "fallback_error";
   // False when the localized frame doesn't clearly show whoever took the
   // shot (e.g. only the ball/hoop is framed, or the shooter is off-screen)
   // — downstream tracking should widen its search clip rather than trust a
@@ -255,11 +264,15 @@ const LocalizationSchema = z.object({
   reason: z.string(),
 });
 
+// Every call site in this file is a "ran fine, nothing usable" outcome —
+// zero frames given, an unparseable response, or Claude explicitly finding
+// no clear evidence — never an exception (those propagate to the caller
+// instead), so this is always fallback_no_evidence, not fallback_error.
 const emptyLocalization = (reason: string): EventLocalizationResult => ({
   localizedTimestampSeconds: 0,
   confidence: 0,
   reason,
-  method: "fallback_midpoint",
+  method: "fallback_no_evidence",
   shooterVisible: false,
   topCandidates: [],
 });

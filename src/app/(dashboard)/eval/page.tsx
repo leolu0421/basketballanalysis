@@ -14,6 +14,56 @@ function formatConfidence(value: number | null) {
   return `${Math.round(value * 100)}%`;
 }
 
+// Green > 80%, Yellow 50-80%, Red < 50% — thresholds per the coach's spec.
+function confidenceColorClass(value: number | null): string {
+  if (value == null) return "text-black/40";
+  if (value > 0.8) return "text-green-600";
+  if (value >= 0.5) return "text-yellow-600";
+  return "text-red-600";
+}
+
+const COLUMNS: { label: string; help: string; align?: "right" }[] = [
+  {
+    label: "Score changes",
+    help: "Number of detected scoreboard changes before filtering (includes readings later discarded as unconfirmed one-off misreads).",
+  },
+  {
+    label: "Candidates",
+    help: "Candidate scoring events after the two-read confirmation filter — exactly what's shown as \"Suggested moments\" in the coach-facing UI.",
+    align: "right",
+  },
+  {
+    label: "Loc. attempts",
+    help: "Candidates for which event localization actually ran. Excludes candidates skipped for an implausible score delta, and any routed to the legacy wide-frame fallback after an earlier tracking failure — those two together make up (Candidates − Loc. attempts).",
+    align: "right",
+  },
+  {
+    label: "Loc. success",
+    help: "Localization attempts where Claude vision identified a real scoring frame.",
+    align: "right",
+  },
+  {
+    label: "Loc. fallback",
+    help: "Localization attempts that ran to completion but found no usable evidence (not an error) — extraction produced zero frames, or Claude found nothing clear enough. Falls back to the scoreboard-gap midpoint.",
+    align: "right",
+  },
+  {
+    label: "Loc. failed",
+    help: "Localization attempts that hit an actual error (ffmpeg failure/timeout, an API error) — distinct from Fallback, which is an expected \"tried, found nothing\" outcome, not a bug.",
+    align: "right",
+  },
+  {
+    label: "Avg. confidence",
+    help: "Average confidence across localization attempts (successful ones report a real confidence; fallback/failed attempts count as 0). Green > 80%, yellow 50-80%, red < 50%.",
+    align: "right",
+  },
+  {
+    label: "Processing time",
+    help: "Total wall-clock time for the analysis job, from creation to completion.",
+    align: "right",
+  },
+];
+
 export default async function EvalPage({
   searchParams,
 }: {
@@ -33,7 +83,8 @@ export default async function EvalPage({
       <div>
         <h1 className="text-2xl font-bold text-navy">AI Pipeline Evaluation</h1>
         <p className="mt-1 text-sm text-black/50">
-          Internal QA — one row per completed video-analysis run. Not shown to coaches.
+          Internal QA — one row per completed video-analysis run. Not shown to coaches. Hover a column
+          header for what it measures; click a row to open that match.
         </p>
       </div>
 
@@ -60,28 +111,30 @@ export default async function EvalPage({
           `form` attribute, so no client-side JS is needed to build a
           compare link out of however many rows get checked. */}
       <form id="compare-form" action="/eval/compare" method="GET" className="mt-3">
-        <button
-          type="submit"
-          className="rounded-lg bg-navy px-3 py-1.5 text-sm font-semibold text-white"
-        >
+        <button type="submit" className="rounded-lg bg-navy px-3 py-1.5 text-sm font-semibold text-white">
           Compare selected (pick 2)
         </button>
       </form>
 
       <div className="mt-4 overflow-x-auto rounded-xl border border-black/5 bg-white">
-        <table className="w-full min-w-[900px] text-left text-sm">
+        <table className="w-full min-w-[1100px] text-left text-sm">
           <thead>
             <tr className="border-b border-black/5 text-xs uppercase tracking-wide text-black/40">
               <th className="px-3 py-2"> </th>
               <th className="px-3 py-2">Match</th>
               <th className="px-3 py-2">Analyzed</th>
               <th className="px-3 py-2">Commit</th>
-              <th className="px-3 py-2 text-right">Score changes</th>
-              <th className="px-3 py-2 text-right">Candidates</th>
-              <th className="px-3 py-2 text-right">Localized</th>
-              <th className="px-3 py-2 text-right">Fallback</th>
-              <th className="px-3 py-2 text-right">Avg. confidence</th>
-              <th className="px-3 py-2 text-right">Processing time</th>
+              {COLUMNS.map((col) => (
+                <th
+                  key={col.label}
+                  title={col.help}
+                  className={`cursor-help px-3 py-2 underline decoration-dotted ${
+                    col.align === "right" ? "text-right" : ""
+                  }`}
+                >
+                  {col.label}
+                </th>
+              ))}
               <th className="px-3 py-2">Benchmark</th>
             </tr>
           </thead>
@@ -91,29 +144,72 @@ export default async function EvalPage({
                 <td className="px-3 py-2">
                   <input type="checkbox" name="compare" value={s.id} form="compare-form" />
                 </td>
-                <td className="px-3 py-2">
-                  <Link href={`/matches/${s.match.id}`} className="font-medium text-navy hover:underline">
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 font-medium text-navy hover:underline">
                     vs {s.match.opponentName}
                   </Link>
                 </td>
-                <td className="px-3 py-2 text-black/60">
-                  {s.analyzedAt.toLocaleString(undefined, {
-                    year: "numeric",
-                    month: "short",
-                    day: "numeric",
-                    hour: "numeric",
-                    minute: "2-digit",
-                  })}
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 text-black/60">
+                    {s.analyzedAt.toLocaleString(undefined, {
+                      year: "numeric",
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}
+                  </Link>
                 </td>
-                <td className="px-3 py-2 font-mono text-xs text-black/50">
-                  {s.gitCommitHash ? s.gitCommitHash.slice(0, 7) : "—"}
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 font-mono text-xs text-black/50">
+                    {s.gitCommitHash ? s.gitCommitHash.slice(0, 7) : "—"}
+                  </Link>
                 </td>
-                <td className="px-3 py-2 text-right">{s.scoreChangesDetected}</td>
-                <td className="px-3 py-2 text-right">{s.suggestedMomentsGenerated}</td>
-                <td className="px-3 py-2 text-right">{s.localizedSuccessfully}</td>
-                <td className="px-3 py-2 text-right">{s.localizationFallbackCount}</td>
-                <td className="px-3 py-2 text-right">{formatConfidence(s.averageLocalizationConfidence)}</td>
-                <td className="px-3 py-2 text-right">{formatSeconds(s.totalProcessingSeconds)}</td>
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2">
+                    {s.scoreChangesDetected}
+                  </Link>
+                </td>
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 text-right">
+                    {s.suggestedMomentsGenerated}
+                  </Link>
+                </td>
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 text-right">
+                    {s.localizationAttempts}
+                  </Link>
+                </td>
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 text-right">
+                    {s.localizationSuccess}
+                  </Link>
+                </td>
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 text-right">
+                    {s.localizationFallback}
+                  </Link>
+                </td>
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 text-right">
+                    {s.localizationFailed}
+                  </Link>
+                </td>
+                <td className="p-0">
+                  <Link
+                    href={`/matches/${s.match.id}`}
+                    className={`block px-3 py-2 text-right font-semibold ${confidenceColorClass(
+                      s.averageLocalizationConfidence
+                    )}`}
+                  >
+                    {formatConfidence(s.averageLocalizationConfidence)}
+                  </Link>
+                </td>
+                <td className="p-0">
+                  <Link href={`/matches/${s.match.id}`} className="block px-3 py-2 text-right">
+                    {formatSeconds(s.totalProcessingSeconds)}
+                  </Link>
+                </td>
                 <td className="px-3 py-2">
                   <form action={setBenchmarkMatchAction.bind(null, s.match.id, !s.match.isBenchmark)}>
                     <button
@@ -132,7 +228,7 @@ export default async function EvalPage({
             ))}
             {summaries.length === 0 && (
               <tr>
-                <td colSpan={11} className="px-3 py-10 text-center text-black/40">
+                <td colSpan={13} className="px-3 py-10 text-center text-black/40">
                   No analysis runs recorded yet{benchmarkOnly ? " for benchmark matches" : ""}.
                 </td>
               </tr>

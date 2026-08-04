@@ -525,3 +525,28 @@ commit) — not worth the ongoing manual-labeling effort until there's an
 actual cadence of comparisons to justify it. `AnalysisSummary.extraMetrics`
 (a JSON column) exists so new metrics can be added later without a schema
 migration.
+
+**Confirmed in production, and fixed**: the first real run reported
+"Candidates: 16, Localized: 1," which looked like localization was
+badly broken. Root cause: `trackingAvailable` (pipeline.ts) is a
+one-way flag — the first candidate whose tracking/localization throws
+flips it permanently, silently routing every later candidate in that
+job to the old wide-frame fallback path, which never even calls
+`localizeCandidate`. Those candidates weren't "failed," they were never
+attempted, and the old metrics had no bucket for that at all — "Localized"
+and "Fallback" only ever summed to a fraction of the real candidate
+count, with the gap invisible.
+
+Fixed by making every candidate land in exactly one of 5 mutually
+exclusive buckets, computed by a pure `summarizeLocalizations()`
+(localization.ts, unit-tested) rather than ad-hoc counting inline:
+**skipped** (implausible delta, or the legacy fallback path — never
+attempted), **success** (Claude found a real frame), **fallback**
+(attempted, ran fine, found no evidence — not an error), and **failed**
+(attempted, an actual exception was thrown — ffmpeg/API failure,
+distinct from fallback). `attempts + skipped == candidates` and
+`attempts == success + fallback + failed` always hold, so nothing is
+uncounted. The `/eval` page's column headers carry a hover tooltip
+explaining exactly what each one measures, average-confidence cells are
+color-coded (green > 80%, yellow 50-80%, red < 50%), and every cell
+links through to the match.

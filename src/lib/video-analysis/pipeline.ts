@@ -12,6 +12,7 @@ import {
   type CandidateToGuess,
   type TrackToGuess,
   type EventLocalizationResult,
+  type LocalizationCandidateFrame,
 } from "./vision";
 import {
   buildScoreCandidates,
@@ -19,7 +20,7 @@ import {
   type ScoreCandidate,
   type BuildCandidatesStats,
 } from "./candidates";
-import { computeLocalizationWindow } from "./localization";
+import { computeLocalizationWindow, summarizeLocalizations } from "./localization";
 
 const FRAME_INTERVAL_SECONDS = 15;
 const FRAMES_PER_VISION_CALL = 10;
@@ -238,26 +239,38 @@ async function localizeCandidate(
   index: number,
   candidate: { previousScoreText: string; scoreText: string; gapStartSeconds: number; gapEndSeconds: number }
 ): Promise<EventLocalizationResult> {
-  const fallback: EventLocalizationResult = {
+  const baseFallback = {
     localizedTimestampSeconds: (candidate.gapStartSeconds + candidate.gapEndSeconds) / 2,
     confidence: 0,
-    reason: "Localization unavailable — using gap midpoint",
-    method: "fallback_midpoint",
     // Unknown whether the shooter is visible anywhere in the (much wider,
     // unlocalized) gap — default to the safer assumption so the caller
     // widens the tracking clip rather than trusting a tight window blind.
     shooterVisible: false,
-    topCandidates: [],
+    topCandidates: [] as LocalizationCandidateFrame[],
   };
 
   try {
     const window = computeLocalizationWindow(candidate.gapStartSeconds, candidate.gapEndSeconds);
     const frames = await extractLocalizationFrames(videoPath, workDir, index, window);
-    if (frames.length === 0) return fallback;
+    if (frames.length === 0) {
+      return {
+        ...baseFallback,
+        reason: "ffmpeg extracted zero frames from the localization window",
+        method: "fallback_no_evidence",
+      };
+    }
     return await localizeScoringMoment(frames, candidate);
   } catch (err) {
+    // Distinct from the frames.length===0 case above: something actually
+    // threw here (ffmpeg failure/timeout, an uncaught Claude API error),
+    // not just "ran fine but found nothing" — see evaluation metrics
+    // (Localization Failed) which rely on this distinction being accurate.
     console.error(`Event localization failed (candidate ${index}) — falling back to gap midpoint:`, err);
-    return fallback;
+    return {
+      ...baseFallback,
+      reason: err instanceof Error ? err.message.slice(0, 300) : "Unknown localization error",
+      method: "fallback_error",
+    };
   }
 }
 
@@ -604,9 +617,7 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
     const candidateStats: BuildCandidatesStats = { visibleReads: 0, rawChangesDetected: 0, discardedUnconfirmed: 0 };
     const candidates = buildScoreCandidates(allReads, FRAME_INTERVAL_SECONDS, candidateStats);
 
-    let localizedCount = 0;
-    let fallbackCount = 0;
-    let averageLocalizationConfidence: number | null = null;
+    let localizationSummary = summarizeLocalizations(0, []);
 
     if (candidates.length > 0) {
       await updateJob(jobId, { status: "MATCHING", progress: 55 });
@@ -644,22 +655,21 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
       // through per-candidate log lines — every candidate that's generated
       // here IS what gets shown in the UI (nothing downstream filters the
       // list further), so candidatesGenerated == candidatesShown always.
-      const implausibleCount = candidates.filter(
-        (c) => !isPlausibleScoreDelta(c.previousScoreText, c.scoreText)
-      ).length;
-      const attempted = localizations.filter((l): l is EventLocalizationResult => l != null);
-      localizedCount = attempted.filter((l) => l.method === "vision").length;
-      fallbackCount = attempted.filter((l) => l.method === "fallback_midpoint").length;
-      averageLocalizationConfidence =
-        attempted.length > 0 ? attempted.reduce((sum, l) => sum + l.confidence, 0) / attempted.length : null;
+      // localizationSummary.skipped covers BOTH candidates skipped for an
+      // implausible delta AND ones routed to the legacy wide-frame fallback
+      // after an earlier tracking failure — attempts + skipped always ==
+      // candidates.length, so nothing is silently uncounted.
+      localizationSummary = summarizeLocalizations(candidates.length, localizations);
 
       console.log(
         `[video-analysis] SUMMARY: ${candidateStats.visibleReads} scoreboard-visible reads, ` +
           `${candidateStats.rawChangesDetected} raw score changes detected, ` +
           `${candidateStats.discardedUnconfirmed} discarded as unconfirmed (likely misreads), ` +
           `${candidates.length} candidates generated (= shown in UI), ` +
-          `${implausibleCount} of those skipped for guessing (implausible delta), ` +
-          `${localizedCount} successfully localized via vision, ${fallbackCount} fell back to gap midpoint`
+          `localization: ${localizationSummary.attempts} attempted, ${localizationSummary.skipped} skipped ` +
+          `(implausible delta or legacy fallback), ${localizationSummary.success} succeeded, ` +
+          `${localizationSummary.fallbackNoEvidence} fell back (no evidence), ` +
+          `${localizationSummary.fallbackError} failed (error)`
       );
     } else {
       console.log(
@@ -681,9 +691,11 @@ export async function runVideoAnalysisJob(jobId: string, source: VideoSource) {
           gitCommitHash: process.env.RAILWAY_GIT_COMMIT_SHA ?? null,
           scoreChangesDetected: candidateStats.rawChangesDetected,
           suggestedMomentsGenerated: candidates.length,
-          localizedSuccessfully: localizedCount,
-          localizationFallbackCount: fallbackCount,
-          averageLocalizationConfidence,
+          localizationAttempts: localizationSummary.attempts,
+          localizationSuccess: localizationSummary.success,
+          localizationFallback: localizationSummary.fallbackNoEvidence,
+          localizationFailed: localizationSummary.fallbackError,
+          averageLocalizationConfidence: localizationSummary.averageAttemptConfidence,
           totalProcessingSeconds: (Date.now() - job.createdAt.getTime()) / 1000,
         },
       });

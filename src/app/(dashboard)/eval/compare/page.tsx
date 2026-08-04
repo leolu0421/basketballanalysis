@@ -13,19 +13,65 @@ function formatConfidence(value: number | null) {
   return `${Math.round(value * 100)}%`;
 }
 
+function confidenceColorClass(value: number | null): string {
+  if (value == null) return "text-black/40";
+  if (value > 0.8) return "text-green-600";
+  if (value >= 0.5) return "text-yellow-600";
+  return "text-red-600";
+}
+
+type Summary = NonNullable<Awaited<ReturnType<typeof getAnalysisSummaryById>>>;
+
 const ROWS: Array<{
   label: string;
-  value: (s: NonNullable<Awaited<ReturnType<typeof getAnalysisSummaryById>>>) => string;
+  help: string;
+  value: (s: Summary) => string;
+  colorClass?: (s: Summary) => string;
 }> = [
-  { label: "Match", value: (s) => `vs ${s.match.opponentName}` },
-  { label: "Analyzed", value: (s) => s.analyzedAt.toLocaleString() },
-  { label: "Commit", value: (s) => (s.gitCommitHash ? s.gitCommitHash.slice(0, 7) : "—") },
-  { label: "Score changes detected", value: (s) => String(s.scoreChangesDetected) },
-  { label: "Suggested moments generated", value: (s) => String(s.suggestedMomentsGenerated) },
-  { label: "Localized successfully", value: (s) => String(s.localizedSuccessfully) },
-  { label: "Localization fallback count", value: (s) => String(s.localizationFallbackCount) },
-  { label: "Average localization confidence", value: (s) => formatConfidence(s.averageLocalizationConfidence) },
-  { label: "Total processing time", value: (s) => formatSeconds(s.totalProcessingSeconds) },
+  { label: "Match", help: "The match this run analyzed.", value: (s) => `vs ${s.match.opponentName}` },
+  { label: "Analyzed", help: "When this run completed.", value: (s) => s.analyzedAt.toLocaleString() },
+  { label: "Commit", help: "Git commit the pipeline ran at.", value: (s) => (s.gitCommitHash ? s.gitCommitHash.slice(0, 7) : "—") },
+  {
+    label: "Score changes",
+    help: "Number of detected scoreboard changes before filtering.",
+    value: (s) => String(s.scoreChangesDetected),
+  },
+  {
+    label: "Candidates",
+    help: "Candidate scoring events after filtering — what's shown as \"Suggested moments.\"",
+    value: (s) => String(s.suggestedMomentsGenerated),
+  },
+  {
+    label: "Localization attempts",
+    help: "Candidates for which localization actually ran (excludes implausible-delta skips and legacy-fallback candidates).",
+    value: (s) => String(s.localizationAttempts),
+  },
+  {
+    label: "Localization success",
+    help: "Attempts where Claude vision found a real scoring frame.",
+    value: (s) => String(s.localizationSuccess),
+  },
+  {
+    label: "Localization fallback",
+    help: "Attempts that ran fine but found no usable evidence — used the scoreboard-gap midpoint instead.",
+    value: (s) => String(s.localizationFallback),
+  },
+  {
+    label: "Localization failed",
+    help: "Attempts that hit an actual error (ffmpeg failure/timeout, API error).",
+    value: (s) => String(s.localizationFailed),
+  },
+  {
+    label: "Average confidence",
+    help: "Average confidence across localization attempts.",
+    value: (s) => formatConfidence(s.averageLocalizationConfidence),
+    colorClass: (s) => confidenceColorClass(s.averageLocalizationConfidence),
+  },
+  {
+    label: "Processing time",
+    help: "Total wall-clock time for the analysis job.",
+    value: (s) => formatSeconds(s.totalProcessingSeconds),
+  },
 ];
 
 export default async function CompareEvalPage({
@@ -83,9 +129,15 @@ export default async function CompareEvalPage({
           <tbody>
             {ROWS.map((row) => (
               <tr key={row.label} className="border-b border-black/5 last:border-0">
-                <td className="px-4 py-2 font-medium text-navy">{row.label}</td>
-                <td className="px-4 py-2 text-black/70">{row.value(a)}</td>
-                <td className="px-4 py-2 text-black/70">{row.value(b)}</td>
+                <td className="px-4 py-2 font-medium text-navy" title={row.help}>
+                  <span className="cursor-help underline decoration-dotted">{row.label}</span>
+                </td>
+                <td className={`px-4 py-2 ${row.colorClass ? row.colorClass(a) : "text-black/70"}`}>
+                  {row.value(a)}
+                </td>
+                <td className={`px-4 py-2 ${row.colorClass ? row.colorClass(b) : "text-black/70"}`}>
+                  {row.value(b)}
+                </td>
               </tr>
             ))}
           </tbody>

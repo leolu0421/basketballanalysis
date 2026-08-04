@@ -39,3 +39,50 @@ export function computeLocalizationWindow(
     end: gapEndSeconds,
   };
 }
+
+export type LocalizationSummary = {
+  candidatesTotal: number;
+  attempts: number;
+  success: number;
+  fallbackNoEvidence: number;
+  fallbackError: number;
+  skipped: number;
+  averageAttemptConfidence: number | null;
+};
+
+/**
+ * Turns the per-candidate localization array (one slot per candidate —
+ * undefined for any that never got an attempt at all, e.g. an implausible
+ * delta or a candidate routed to the legacy wide-frame fallback after an
+ * earlier tracking failure) into exact, auditable counts for the /eval
+ * page. Deliberately a plain function over plain data — no ffmpeg, no
+ * Prisma, no network — so this counting logic itself is unit-testable
+ * rather than trusted on faith.
+ *
+ * `attempts` (= not skipped) is always success + fallbackNoEvidence +
+ * fallbackError, and `skipped` + `attempts` is always candidatesTotal —
+ * every candidate is accounted for in exactly one bucket.
+ */
+export function summarizeLocalizations(
+  candidatesTotal: number,
+  localizations: Array<{ method: "vision" | "fallback_no_evidence" | "fallback_error"; confidence: number } | undefined>
+): LocalizationSummary {
+  const attempted = localizations.filter(
+    (l): l is { method: "vision" | "fallback_no_evidence" | "fallback_error"; confidence: number } => l != null
+  );
+
+  const success = attempted.filter((l) => l.method === "vision").length;
+  const fallbackNoEvidence = attempted.filter((l) => l.method === "fallback_no_evidence").length;
+  const fallbackError = attempted.filter((l) => l.method === "fallback_error").length;
+
+  return {
+    candidatesTotal,
+    attempts: attempted.length,
+    success,
+    fallbackNoEvidence,
+    fallbackError,
+    skipped: candidatesTotal - attempted.length,
+    averageAttemptConfidence:
+      attempted.length > 0 ? attempted.reduce((sum, l) => sum + l.confidence, 0) / attempted.length : null,
+  };
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeLocalizationWindow, MAX_LOCALIZATION_WINDOW_SECONDS } from "./localization";
+import { computeLocalizationWindow, summarizeLocalizations, MAX_LOCALIZATION_WINDOW_SECONDS } from "./localization";
 
 describe("computeLocalizationWindow", () => {
   it("pads a few seconds before gapStart for a normal-sized gap", () => {
@@ -44,5 +44,75 @@ describe("computeLocalizationWindow", () => {
       expect(window.end).toBeGreaterThanOrEqual(window.start);
       expect(window.start).toBeGreaterThanOrEqual(0);
     }
+  });
+});
+
+describe("summarizeLocalizations", () => {
+  it("splits vision/no-evidence/error into distinct buckets, matching the real 16-candidate case", () => {
+    // Reproduces the "Candidates: 16, Localized: 1" report: one early
+    // success, then every later candidate skipped entirely because
+    // tracking broke (never even attempted, not fallback/failed).
+    const localizations = [
+      { method: "vision" as const, confidence: 0.9 },
+      undefined,
+      undefined,
+      undefined,
+    ];
+    const summary = summarizeLocalizations(16, localizations);
+
+    expect(summary.candidatesTotal).toBe(16);
+    expect(summary.success).toBe(1);
+    expect(summary.attempts).toBe(1);
+    // skipped = candidates never attempted at all (implausible delta, or
+    // legacy fallback after a tracking break) -- not the same as "failed"
+    expect(summary.skipped).toBe(15);
+    expect(summary.fallbackError).toBe(0);
+    expect(summary.fallbackNoEvidence).toBe(0);
+  });
+
+  it("keeps fallback (no evidence) and failed (error) as separate counts", () => {
+    const localizations = [
+      { method: "vision" as const, confidence: 0.95 },
+      { method: "fallback_no_evidence" as const, confidence: 0 },
+      { method: "fallback_no_evidence" as const, confidence: 0 },
+      { method: "fallback_error" as const, confidence: 0 },
+    ];
+    const summary = summarizeLocalizations(4, localizations);
+
+    expect(summary.success).toBe(1);
+    expect(summary.fallbackNoEvidence).toBe(2);
+    expect(summary.fallbackError).toBe(1);
+    expect(summary.attempts).toBe(4);
+    expect(summary.skipped).toBe(0);
+  });
+
+  it("attempts + skipped always equals candidatesTotal", () => {
+    const localizations = [{ method: "vision" as const, confidence: 0.7 }, undefined];
+    const summary = summarizeLocalizations(5, localizations);
+    expect(summary.attempts + summary.skipped).toBe(summary.candidatesTotal);
+  });
+
+  it("attempts always equals success + fallbackNoEvidence + fallbackError", () => {
+    const localizations = [
+      { method: "vision" as const, confidence: 0.6 },
+      { method: "fallback_no_evidence" as const, confidence: 0 },
+      { method: "fallback_error" as const, confidence: 0 },
+    ];
+    const summary = summarizeLocalizations(3, localizations);
+    expect(summary.attempts).toBe(summary.success + summary.fallbackNoEvidence + summary.fallbackError);
+  });
+
+  it("computes average confidence across attempts only, not skipped candidates", () => {
+    const localizations = [
+      { method: "vision" as const, confidence: 1.0 },
+      { method: "vision" as const, confidence: 0.5 },
+    ];
+    const summary = summarizeLocalizations(10, localizations);
+    expect(summary.averageAttemptConfidence).toBeCloseTo(0.75);
+  });
+
+  it("returns null average confidence when there are no attempts", () => {
+    const summary = summarizeLocalizations(3, [undefined, undefined, undefined]);
+    expect(summary.averageAttemptConfidence).toBeNull();
   });
 });
