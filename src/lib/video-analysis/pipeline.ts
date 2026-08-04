@@ -340,7 +340,7 @@ async function trackCandidate(
  * statType always still comes from Claude, since the classifier only
  * identifies jersey numbers.
  */
-async function guessCandidatePlayers(
+export async function guessCandidatePlayers(
   jobId: string,
   candidates: ScoreCandidate[],
   videoPath: string,
@@ -358,7 +358,13 @@ async function guessCandidatePlayers(
 
   const useLocalModel = await hasTrainedJerseyModel();
 
-  let trackingAvailable = true;
+  // Confirmed in production: a shared trackingAvailable flag here used to
+  // permanently disable localization/tracking for every remaining candidate
+  // the moment any ONE candidate's tracking step threw — e.g. one flaky
+  // ffmpeg/YOLO run could rob a dozen unrelated, perfectly fine candidates
+  // of a fair shot. Each candidate is now fully isolated: its own
+  // try/catch, its own outcome, no shared state. A failure only affects
+  // the candidate that actually failed.
   const fallbackIndices: number[] = [];
 
   for (let index = 0; index < candidates.length; index++) {
@@ -383,11 +389,6 @@ async function guessCandidatePlayers(
         `[video-analysis] candidate ${index}: ${candidate.previousScoreText} -> ${candidate.scoreText}, ` +
           `gap ${candidate.gapStartSeconds}s-${candidate.gapEndSeconds}s, skipped (implausible delta)`
       );
-      continue;
-    }
-
-    if (!trackingAvailable) {
-      fallbackIndices.push(index);
       continue;
     }
 
@@ -457,11 +458,13 @@ async function guessCandidatePlayers(
           `guessed jersey #${chosen?.jerseyNumber ?? "?"} -> player ${chosen?.playerId ?? "unresolved"}, stat ${chosen?.statType ?? "?"}`
       );
     } catch (err) {
-      console.error(
-        `Tracking-based guess failed (candidate ${index}) — falling back to wide-frame guessing for remaining candidates:`,
-        err
-      );
-      trackingAvailable = false;
+      // Isolated to this candidate only — does not affect any other
+      // candidate's chance at localization/tracking. localizations[index]
+      // may already be set from a successful localizeCandidate() call
+      // earlier in this same try block, even though the later
+      // tracking/guess step is what actually threw; the wide-frame
+      // fallback log below checks for that instead of assuming neither ran.
+      console.error(`Tracking-based guess failed for candidate ${index} only (falls back to wide-frame guessing for this candidate):`, err);
       fallbackIndices.push(index);
     }
   }
@@ -496,9 +499,18 @@ async function guessCandidatePlayers(
             playerId,
           };
           const c = candidates[guess.candidateIndex];
+          // localizations[index] may already be set here — localizeCandidate
+          // can succeed even when the later tracking/guess step (what
+          // actually landed this candidate in the fallback batch) fails.
+          // Report that accurately instead of always claiming "no
+          // localization," which was misleading for exactly that case.
+          const priorLocalization = localizations[guess.candidateIndex];
+          const localizationNote = priorLocalization
+            ? `localization had ${priorLocalization.method === "vision" ? "succeeded" : priorLocalization.method} before tracking failed`
+            : "no localization was attempted";
           console.log(
             `[video-analysis] candidate ${guess.candidateIndex}: ${c.previousScoreText} -> ${c.scoreText}, ` +
-              `gap ${c.gapStartSeconds}s-${c.gapEndSeconds}s, wide-frame fallback (no localization), ` +
+              `gap ${c.gapStartSeconds}s-${c.gapEndSeconds}s, wide-frame fallback (${localizationNote}), ` +
               `guessed jersey #${guess.jerseyNumber ?? "?"} -> player ${playerId ?? "unresolved"}, stat ${guess.statType ?? "?"}`
           );
         }
