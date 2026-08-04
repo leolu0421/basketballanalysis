@@ -1,7 +1,9 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+
+const CLAUDE_MODEL = "claude-opus-4-8";
 
 const FrameReadsSchema = z.object({
   reads: z.array(
@@ -54,6 +56,54 @@ function getClient() {
   return client;
 }
 
+/** Never logs the actual key — only enough to confirm which one is in use. */
+function describeApiKey(): string {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return "MISSING (ANTHROPIC_API_KEY env var is not set)";
+  if (key.length < 16) return `present but suspiciously short (length ${key.length})`;
+  return `present, prefix="${key.slice(0, 14)}...", length=${key.length}`;
+}
+
+/**
+ * Confirmed in production: a coach saw "Your credit balance is too low to
+ * access the Anthropic API" on an account that actually had credit
+ * available — meaning the message alone isn't trustworthy for diagnosing
+ * what's actually wrong (wrong key, deleted key, wrong org, a stale env var
+ * that didn't redeploy, or a model this particular org/key can't access all
+ * produce different real problems, but some can surface as confusingly
+ * generic-sounding API errors). This wraps every Claude call so a failure
+ * logs everything needed to tell those apart: which model was requested,
+ * whether the key is even present (never the key itself), the HTTP status,
+ * the error type Anthropic reported, the request ID (for cross-referencing
+ * with Anthropic's own dashboard/support), and the complete error body.
+ */
+async function callClaude<T>(context: string, request: () => Promise<T>): Promise<T> {
+  console.log(`[claude-api] ${context}: model=${CLAUDE_MODEL}, apiKey=${describeApiKey()}`);
+  try {
+    return await request();
+  } catch (err) {
+    if (err instanceof APIError) {
+      const headerEntries: Record<string, string> = {};
+      err.headers?.forEach((value: string, key: string) => {
+        headerEntries[key] = value;
+      });
+      console.error(
+        `[claude-api] ${context} FAILED — model=${CLAUDE_MODEL}, apiKey=${describeApiKey()}, ` +
+          `httpStatus=${err.status}, errorType=${err.type}, requestId=${err.requestID}, ` +
+          `responseHeaders=${JSON.stringify(headerEntries)}, ` +
+          `fullErrorBody=${JSON.stringify(err.error)}`
+      );
+    } else {
+      console.error(
+        `[claude-api] ${context} FAILED (not an Anthropic API error — likely a network/timeout/SDK issue) — ` +
+          `model=${CLAUDE_MODEL}, apiKey=${describeApiKey()}:`,
+        err
+      );
+    }
+    throw err;
+  }
+}
+
 /**
  * Sends a batch of video frames to Claude vision and asks it to transcribe
  * whatever on-screen scoreboard text is visible in each one.
@@ -85,14 +135,16 @@ export async function readScoreboardBatch(
     });
   }
 
-  const response = await anthropic.messages.parse({
-    model: "claude-opus-4-8",
-    max_tokens: 2048,
-    messages: [{ role: "user", content }],
-    output_config: {
-      format: zodOutputFormat(FrameReadsSchema),
-    },
-  });
+  const response = await callClaude("readScoreboardBatch", () =>
+    anthropic.messages.parse({
+      model: CLAUDE_MODEL,
+      max_tokens: 2048,
+      messages: [{ role: "user", content }],
+      output_config: {
+        format: zodOutputFormat(FrameReadsSchema),
+      },
+    })
+  );
 
   if (!response.parsed_output) {
     throw new Error("Vision analysis did not return a valid structured response");
@@ -168,14 +220,16 @@ Cross-check these cues against each other within the sequence before deciding �
     }
   }
 
-  const response = await anthropic.messages.parse({
-    model: "claude-opus-4-8",
-    max_tokens: 2048,
-    messages: [{ role: "user", content }],
-    output_config: {
-      format: zodOutputFormat(CandidateGuessesSchema),
-    },
-  });
+  const response = await callClaude("guessCandidateStatsBatch", () =>
+    anthropic.messages.parse({
+      model: CLAUDE_MODEL,
+      max_tokens: 2048,
+      messages: [{ role: "user", content }],
+      output_config: {
+        format: zodOutputFormat(CandidateGuessesSchema),
+      },
+    })
+  );
 
   if (!response.parsed_output) {
     throw new Error("Vision analysis did not return a valid structured response");
@@ -235,14 +289,16 @@ export async function guessCandidateFromTracks(
     }
   }
 
-  const response = await anthropic.messages.parse({
-    model: "claude-opus-4-8",
-    max_tokens: 1024,
-    messages: [{ role: "user", content }],
-    output_config: {
-      format: zodOutputFormat(TrackGuessSchema),
-    },
-  });
+  const response = await callClaude("guessCandidateFromTracks", () =>
+    anthropic.messages.parse({
+      model: CLAUDE_MODEL,
+      max_tokens: 1024,
+      messages: [{ role: "user", content }],
+      output_config: {
+        format: zodOutputFormat(TrackGuessSchema),
+      },
+    })
+  );
 
   if (!response.parsed_output) {
     throw new Error("Vision analysis did not return a valid structured response");
@@ -329,14 +385,16 @@ Report up to 3 candidate frames (best first) that could be the scoring moment, e
     });
   }
 
-  const response = await anthropic.messages.parse({
-    model: "claude-opus-4-8",
-    max_tokens: 768,
-    messages: [{ role: "user", content }],
-    output_config: {
-      format: zodOutputFormat(LocalizationSchema),
-    },
-  });
+  const response = await callClaude("localizeScoringMoment", () =>
+    anthropic.messages.parse({
+      model: CLAUDE_MODEL,
+      max_tokens: 768,
+      messages: [{ role: "user", content }],
+      output_config: {
+        format: zodOutputFormat(LocalizationSchema),
+      },
+    })
+  );
 
   if (!response.parsed_output) {
     return emptyLocalization("Vision analysis did not return a valid structured response");
