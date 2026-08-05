@@ -15,8 +15,12 @@
  * -------------------------------------
  * - This script is NEVER imported by application code. It has no import
  *   path from src/. It is invoked manually, from the command line, only.
- * - It never touches the database. No `prisma` import, no DB client of any
- *   kind. It cannot write, update, or delete anything in Postgres.
+ * - The ONLY database access anywhere in this script is a single read-only
+ *   `prisma.match.findUnique(...)` lookup, and only when --match-id is
+ *   passed (see VIDEO SOURCE below) — it exists solely to resolve which
+ *   video file/YouTube ID a match points at, the same lookup
+ *   startVideoAnalysisAction does. Nothing in this script ever calls
+ *   create/update/delete/upsert on any table, for any reason.
  * - It never creates Suggested Moments, never modifies match data, never
  *   writes to any table the app reads from. Its only outputs are local
  *   files under --output-dir (JSON, CSV, JPEG crops).
@@ -38,16 +42,41 @@
  *
  * VIDEO SOURCE
  * ------------
- * Exactly one of --youtube-id / --video-path / --video-url is required.
+ * Exactly one of --youtube-id / --video-path / --video-url / --match-id is
+ * required.
+ *
+ * --match-id=<ID> reuses the production video source instead of you having
+ * to know a YouTube ID or file path yourself: it looks up that Match row
+ * (read-only — see SAFETY above) and resolves it EXACTLY the way
+ * startVideoAnalysisAction does (src/lib/actions/video-analysis-actions.ts):
+ *   1. match.videoFileName set  -> local file path via the same
+ *      videoStoragePathFor(matchId, fileName) logic as
+ *      src/lib/video-storage.ts (ported inline here — see
+ *      resolveSourceFromMatch — since this script deliberately stays
+ *      import-free of src/ TypeScript files; kept byte-for-byte in sync).
+ *   2. else match.youtubeVideoId set -> this script DELIBERATELY DOES NOT
+ *      download it. Production's only way to fetch a YouTube-sourced video
+ *      is yt-dlp, and this diagnostic was told not to use yt-dlp — so a
+ *      match that resolves to youtubeVideoId is reported and the run stops
+ *      there rather than silently reimplementing an equivalent download.
+ *      Use --youtube-id or --video-url yourself from wherever can actually
+ *      reach YouTube instead.
+ *   3. else -> "This match has no video linked or uploaded yet" (same
+ *      message production returns).
+ * Needs a working DATABASE_URL (same one production uses) in the
+ * environment this script runs in — see resolveSourceFromMatch for what
+ * happens when that's missing/unreachable.
+ *
  * IMPORTANT: if you run this via `railway run ...`, that executes the
  * command LOCALLY (wherever you type `railway run`) with Railway's
  * environment variables injected — it does NOT run inside the actual
  * Railway container and does NOT mount the production Railway Volume. A
- * --video-path pointing at a Volume-only path (e.g. /data/videos/...) will
- * not resolve under `railway run` unless that path also exists locally.
- * Use --youtube-id or --video-url for anything that isn't on your own
- * machine, or run this from inside the actual deployed container (e.g. via
- * Railway's web Shell) if you specifically need the Volume's contents.
+ * --video-path (or a --match-id that resolves to a local file) pointing at
+ * a Volume-only path (e.g. /data/videos/...) will not resolve under
+ * `railway run` unless that path also exists locally. Use --youtube-id or
+ * --video-url for anything that isn't on your own machine, or run this
+ * from inside the actual deployed container (e.g. via Railway's web Shell)
+ * if you specifically need the Volume's contents.
  *
  * WORKFLOW — three gated steps before any API credit is spent
  * ---------------------------------------------------------------
@@ -78,6 +107,7 @@ import { fileURLToPath } from "node:url";
 import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
+import { PrismaClient } from "@prisma/client";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, "..");
@@ -157,6 +187,8 @@ function parseArgs(argv) {
       args.videoPath = raw.slice("--video-path=".length);
     } else if (raw.startsWith("--video-url=")) {
       args.videoUrl = raw.slice("--video-url=".length);
+    } else if (raw.startsWith("--match-id=")) {
+      args.matchId = raw.slice("--match-id=".length);
     } else if (raw.startsWith("--crop=")) {
       args.crop = raw.slice("--crop=".length);
     } else if (raw.startsWith("--batch-size=")) {
@@ -188,6 +220,10 @@ Video source (exactly one required, except with --plan-only):
   --youtube-id=<ID>              Download via yt-dlp, same as production.
   --video-path=<PATH>            Use a local/mounted file directly.
   --video-url=<URL>               Download from a signed or public URL.
+  --match-id=<ID>                 Look up the Match row (read-only) and resolve its
+                                  video the same way startVideoAnalysisAction does.
+                                  Stops (no download) if it resolves to a YouTube
+                                  video — this script does not use yt-dlp.
 
 Crop (required, except with --plan-only or --prepare-crop):
   --crop=x:y:width:height        Scoreboard crop rectangle, in source pixels.
@@ -312,11 +348,15 @@ async function pathExists(p) {
 // Video source resolution
 // ---------------------------------------------------------------------------
 async function resolveVideoSource(args, workDir) {
-  const provided = ["youtubeId", "videoPath", "videoUrl"].filter((k) => args[k]);
+  const provided = ["youtubeId", "videoPath", "videoUrl", "matchId"].filter((k) => args[k]);
   if (provided.length !== 1) {
     throw new Error(
-      `Exactly one of --youtube-id / --video-path / --video-url is required (got ${provided.length}: ${provided.join(", ") || "none"}).`
+      `Exactly one of --youtube-id / --video-path / --video-url / --match-id is required (got ${provided.length}: ${provided.join(", ") || "none"}).`
     );
+  }
+
+  if (args.matchId) {
+    return await resolveSourceFromMatch(args.matchId);
   }
 
   if (args.videoPath) {
@@ -377,6 +417,102 @@ async function resolveVideoSource(args, workDir) {
   }
   console.log(`[video-source] Downloaded to: ${dest}`);
   return dest;
+}
+
+// Mirrors src/lib/video-storage.ts's VIDEO_STORAGE_DIR default +
+// videoStoragePathFor() EXACTLY (same env var, same fallback shape, same
+// sanitizing regex, same path.join order) — ported inline rather than
+// imported, since this script deliberately stays free of any dependency on
+// importing src/'s TypeScript. Keep this in sync if that file changes.
+// One deliberate difference: production's fallback is
+// path.join(process.cwd(), ".video-storage") — this uses PROJECT_ROOT
+// instead of process.cwd(), so the fallback resolves the same way no
+// matter what directory you invoke this script from.
+const VIDEO_STORAGE_DIR_MIRROR = process.env.VIDEO_STORAGE_DIR || path.join(PROJECT_ROOT, ".video-storage");
+function videoStoragePathForMirror(matchId, fileName) {
+  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return path.join(VIDEO_STORAGE_DIR_MIRROR, matchId, safeName);
+}
+
+let prismaClient = null;
+function getPrismaClient() {
+  if (!prismaClient) prismaClient = new PrismaClient();
+  return prismaClient;
+}
+
+/**
+ * --match-id resolution: reuses the production video source instead of you
+ * having to already know a YouTube ID or file path. Mirrors
+ * startVideoAnalysisAction's exact lookup and branching
+ * (src/lib/actions/video-analysis-actions.ts) — videoFileName wins over
+ * youtubeVideoId, same as production.
+ *
+ * The ONLY database call in this entire script: a single read-only
+ * `prisma.match.findUnique(...)`. No write method is ever called anywhere
+ * in this file.
+ *
+ * Deliberately does NOT fall back to downloading a YouTube-sourced match —
+ * production's only path for that is yt-dlp, and this diagnostic was told
+ * not to use yt-dlp, so that branch reports what it found and stops rather
+ * than quietly reimplementing an equivalent download some other way.
+ */
+async function resolveSourceFromMatch(matchId) {
+  console.log(`[video-source] Looking up Match ${matchId} (read-only) — same lookup as startVideoAnalysisAction...`);
+  const prisma = getPrismaClient();
+
+  let match;
+  try {
+    match = await prisma.match.findUnique({
+      where: { id: matchId },
+      select: { id: true, videoFileName: true, youtubeVideoId: true },
+    });
+  } catch (err) {
+    if (err?.name === "PrismaClientInitializationError") {
+      // Prisma's message is multi-line boilerplate ("Invalid `...`
+      // invocation:") wrapped around the one line that actually explains
+      // what's wrong (usually starts with "error:") — prefer that line,
+      // falling back to the first non-empty line if the shape ever changes.
+      const lines = String(err.message).split("\n").map((l) => l.trim()).filter(Boolean);
+      const firstUsefulLine = lines.find((l) => l.toLowerCase().startsWith("error:")) ?? lines[0] ?? String(err.message);
+      throw new Error(
+        `Could not connect to the database (DATABASE_URL missing/invalid in this environment): ${firstUsefulLine} ` +
+          `--match-id needs the same DATABASE_URL production uses — e.g. run this via "railway run" so ` +
+          `Railway's real environment variables are injected, rather than whatever's in a local .env.`
+      );
+    }
+    throw err;
+  } finally {
+    await prisma.$disconnect();
+  }
+
+  if (!match) {
+    throw new Error(`Match ${matchId} not found in the database this script is connected to.`);
+  }
+
+  if (match.videoFileName) {
+    const filePath = videoStoragePathForMirror(matchId, match.videoFileName);
+    console.log(`[video-source] Match has videoFileName="${match.videoFileName}" -> resolved local path: ${filePath}`);
+    if (!(await pathExists(filePath))) {
+      throw new Error(
+        `Resolved to a local file path (same logic as videoStoragePathFor) but it doesn't exist here: ${filePath}. ` +
+          `Reminder: if you're running this via "railway run", that executes LOCALLY with Railway's env vars ` +
+          `injected — it does NOT mount the production Railway Volume. Either set VIDEO_STORAGE_DIR to wherever ` +
+          `you can actually reach that Volume's contents, or run this from inside the deployed container.`
+      );
+    }
+    return filePath;
+  }
+
+  if (match.youtubeVideoId) {
+    throw new Error(
+      `Match ${matchId} resolves to youtubeVideoId="${match.youtubeVideoId}" (https://www.youtube.com/watch?v=${match.youtubeVideoId}). ` +
+        `Production would download this via yt-dlp — this diagnostic was told not to use yt-dlp, so it stops ` +
+        `here instead of reimplementing an equivalent download. Re-run with --youtube-id=${match.youtubeVideoId} ` +
+        `or --video-url=... from an environment that can actually reach YouTube.`
+    );
+  }
+
+  throw new Error(`This match has no video linked or uploaded yet.`); // same message production returns
 }
 
 /** Used only in a log line — never prints query strings/tokens from a signed URL. */
@@ -1084,6 +1220,7 @@ function recordBatchResults(timelineRows, gapId, phase, batchNumber, model, batc
 }
 
 function describeSource(args) {
+  if (args.matchId) return { type: "match-id", matchId: args.matchId };
   if (args.youtubeId) return { type: "youtube", youtubeId: args.youtubeId };
   if (args.videoPath) return { type: "video-path", videoPath: args.videoPath };
   if (args.videoUrl) return { type: "video-url", host: safeUrlHost(args.videoUrl) }; // never store the full (possibly signed) URL
