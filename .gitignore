@@ -53,3 +53,7 @@ __pycache__/
 # your trained jersey-number model (see README) — a host-specific deploy
 # artifact, not source; copy it directly to wherever video analysis runs
 /models/
+
+# scripts/diagnose-scoreboard-gaps.mjs output — local diagnostic run
+# artifacts (JSON/CSV/crop JPEGs), not source
+/scripts/diagnostics-output/
