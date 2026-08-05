@@ -49,9 +49,24 @@
  * machine, or run this from inside the actual deployed container (e.g. via
  * Railway's web Shell) if you specifically need the Volume's contents.
  *
+ * WORKFLOW — three gated steps before any API credit is spent
+ * ---------------------------------------------------------------
+ * 1. --prepare-crop   Saves one FULL, uncropped, original-resolution frame
+ *                     per gap and prints its width/height + file path. No
+ *                     --crop needed (that's the point — you don't know the
+ *                     right rectangle yet), no Anthropic call anywhere near
+ *                     this step. Look at these to pick x:y:width:height.
+ * 2. --verify-crop    Needs --crop=x:y:width:height (from step 1). Saves one
+ *                     CROPPED sample per gap and prints its file path, so
+ *                     you can confirm the crop fully contains the
+ *                     scoreboard before it's used for real. Still no
+ *                     Anthropic call.
+ * 3. (no flag)        The full pilot — coarse/dense extraction, batching,
+ *                     and the actual paid Claude vision calls.
+ *
  * USAGE — see the bottom of this file / the project chat for exact
- * copy-pasteable commands (verify-crop, youtube pilot, video-path pilot,
- * locating output).
+ * copy-pasteable commands (prepare-crop, verify-crop, youtube pilot,
+ * video-path pilot, locating output).
  */
 
 import { spawn } from "node:child_process";
@@ -132,6 +147,8 @@ function parseArgs(argv) {
   for (const raw of argv) {
     if (raw === "--verify-crop") {
       args.verifyCrop = true;
+    } else if (raw === "--prepare-crop") {
+      args.prepareCrop = true;
     } else if (raw === "--plan-only") {
       args.planOnly = true;
     } else if (raw.startsWith("--youtube-id=")) {
@@ -165,17 +182,23 @@ function printHelp() {
   console.log(`
 diagnose-scoreboard-gaps.mjs — standalone scoreboard-read diagnostic (no DB writes, never imported by the app)
 
+Recommended order: --prepare-crop  ->  pick --crop=x:y:w:h by eye  ->  --verify-crop  ->  full run.
+
 Video source (exactly one required, except with --plan-only):
   --youtube-id=<ID>              Download via yt-dlp, same as production.
   --video-path=<PATH>            Use a local/mounted file directly.
   --video-url=<URL>               Download from a signed or public URL.
 
-Crop (required, except with --plan-only):
+Crop (required, except with --plan-only or --prepare-crop):
   --crop=x:y:width:height        Scoreboard crop rectangle, in source pixels.
 
 Other flags:
-  --verify-crop                  Save one sample crop per gap, print paths, exit.
-                                  (Always happens first anyway — this just stops there.)
+  --prepare-crop                  Save one FULL, uncropped frame per gap, print each
+                                  frame's width/height and file path, exit. No --crop
+                                  needed, no API calls — this is step 1, before you know
+                                  what crop rectangle to even pick.
+  --verify-crop                  Save one CROPPED sample per gap (needs --crop), print
+                                  paths, exit. No API calls. This is step 2.
   --plan-only                    Print expected frame/request counts and exit.
                                   No video, no crop, no network, no API calls.
   --batch-size=<N>                Frames per Claude request (default ${DEFAULT_BATCH_SIZE}).
@@ -236,6 +259,39 @@ function run(cmd, args, timeoutMs) {
         reject(new Error(`${cmd} timed out after ${Math.round(timeoutMs / 1000)}s and was killed`));
       } else if (code === 0) {
         resolve();
+      } else {
+        reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(-1500)}`));
+      }
+    });
+  });
+}
+
+function runCapture(cmd, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args);
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.stdout?.on("data", (d) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d) => {
+      stderr += d.toString();
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(new Error(`Failed to run ${cmd}: ${err.message}`));
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${cmd} timed out after ${Math.round(timeoutMs / 1000)}s and was killed`));
+      } else if (code === 0) {
+        resolve(stdout);
       } else {
         reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(-1500)}`));
       }
@@ -359,6 +415,48 @@ function cropFilter(crop) {
 // ---------------------------------------------------------------------------
 // Frame extraction
 // ---------------------------------------------------------------------------
+
+/**
+ * --prepare-crop step: saves one FULL, uncropped, original-resolution frame
+ * per gap — no --crop needed, since the whole point is figuring out what
+ * crop rectangle to use in the first place. No Anthropic call anywhere near
+ * this function.
+ */
+async function extractFullFrame(videoPath, gap, outDir) {
+  await mkdir(outDir, { recursive: true });
+  const outPath = path.join(outDir, `${gap.id}-full-frame.jpg`);
+  const sampleAt = gap.startSeconds + Math.min(2, (gap.endSeconds - gap.startSeconds) / 2);
+  await run(
+    "ffmpeg",
+    ["-y", "-ss", String(sampleAt), "-i", videoPath, "-vframes", "1", "-q:v", "2", outPath],
+    FFMPEG_TIMEOUT_MS
+  );
+  // ffmpeg exits 0 even when -ss seeks past the end of the video — it just
+  // writes no output frame. Caught here with a clear message instead of
+  // surfacing as a confusing "no such file" from whatever reads outPath next.
+  if (!(await pathExists(outPath))) {
+    throw new Error(
+      `ffmpeg produced no frame for gap ${gap.id} at t=${sampleAt}s — the source video is likely shorter ` +
+        `than that (check its actual duration; this gap's timestamps may not apply to this video).`
+    );
+  }
+  return outPath;
+}
+
+/** Reads back the actual saved dimensions of an extracted frame via ffprobe. */
+async function getImageDimensions(imagePath) {
+  const output = await runCapture(
+    "ffprobe",
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", imagePath],
+    FFMPEG_TIMEOUT_MS
+  );
+  const [width, height] = output.trim().split("x").map((n) => Number.parseInt(n, 10));
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    throw new Error(`ffprobe did not return parseable dimensions for ${imagePath}: "${output.trim()}"`);
+  }
+  return { width, height };
+}
+
 async function extractCropSample(videoPath, crop, gap, outDir) {
   await mkdir(outDir, { recursive: true });
   const outPath = path.join(outDir, `${gap.id}-sample.jpg`);
@@ -368,6 +466,13 @@ async function extractCropSample(videoPath, crop, gap, outDir) {
     ["-y", "-ss", String(sampleAt), "-i", videoPath, "-vframes", "1", "-vf", cropFilter(crop), "-q:v", "2", outPath],
     FFMPEG_TIMEOUT_MS
   );
+  // Same silent-past-EOF failure mode as extractFullFrame — see its comment.
+  if (!(await pathExists(outPath))) {
+    throw new Error(
+      `ffmpeg produced no frame for gap ${gap.id} at t=${sampleAt}s — the source video is likely shorter ` +
+        `than that (check its actual duration; this gap's timestamps may not apply to this video).`
+    );
+  }
   return outPath;
 }
 
@@ -397,6 +502,12 @@ async function extractFrames(videoPath, crop, start, duration, intervalSeconds, 
     FFMPEG_TIMEOUT_MS
   );
   const files = (await readdir(outDir)).filter((f) => f.endsWith(".jpg")).sort();
+  if (files.length === 0) {
+    throw new Error(
+      `ffmpeg extracted zero frames for interval start=${start}s duration=${duration}s — the source video ` +
+        `is likely shorter than that, or this window falls outside it (check the video's actual duration).`
+    );
+  }
   return files.map((file, i) => ({
     path: path.join(outDir, file),
     timestampSeconds: start + i * intervalSeconds,
@@ -642,24 +753,42 @@ async function main() {
     throw new Error(`--gaps matched none of A,B,C (got "${args.gaps.join(",")}")`);
   }
 
-  const crop = parseCrop(args.crop);
-
   const outputDir = args.outputDir ?? path.join(PROJECT_ROOT, "scripts", "diagnostics-output", new Date().toISOString().replace(/[:.]/g, "-"));
   await mkdir(outputDir, { recursive: true });
   const framesRootDir = path.join(outputDir, "frames");
   const cropVerifyDir = path.join(outputDir, "crop-verify");
+  const prepareCropDir = path.join(outputDir, "prepare-crop");
 
   console.log(`[setup] Output directory: ${outputDir}`);
   console.log(
     `[setup] ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? "set" : "MISSING"} (never logging its value)`
   );
 
-  const model = await resolveProductionModel();
-  console.log(`[setup] Using production model (read from vision.ts): ${model}`);
-
   const workDir = path.join(outputDir, "source-video");
   await mkdir(workDir, { recursive: true });
   const videoPath = await resolveVideoSource(args, workDir);
+
+  // --- Step 1 (--prepare-crop): full, uncropped frames, no --crop needed, ---
+  // --- no Anthropic call anywhere near this branch. Returns before crop   ---
+  // --- parsing, model resolution, or anything crop/API-related runs.     ---
+  if (args.prepareCrop) {
+    console.log(`\n[prepare-crop] Extracting one full, uncropped frame per selected gap...`);
+    for (const gap of selectedGaps) {
+      const framePath = await extractFullFrame(videoPath, gap, prepareCropDir);
+      const { width, height } = await getImageDimensions(framePath);
+      console.log(`[prepare-crop] Gap ${gap.id}: ${width}x${height} -> ${framePath}`);
+    }
+    console.log(
+      `\n[prepare-crop] Done — no API calls were made. Inspect the frame(s) above, note the scoreboard's ` +
+        `pixel rectangle, then run again with --crop=x:y:width:height --verify-crop.`
+    );
+    return;
+  }
+
+  const crop = parseCrop(args.crop);
+
+  const model = await resolveProductionModel();
+  console.log(`[setup] Using production model (read from vision.ts): ${model}`);
 
   // --- Crop verification: always runs first, before anything is sent to Claude. ---
   console.log(`\n[crop-verify] Extracting one sample crop per selected gap...`);
