@@ -4,6 +4,11 @@ import { useRef } from "react";
 
 export type Shot = { x: number; y: number; made: boolean };
 
+// Lane hash marks (rebounding-position blocks) — distances from the
+// baseline in SVG units, at this diagram's 2 units/ft scale (real NBA
+// marks are at roughly 7ft, 8ft4in, 11ft, 14ft from the baseline).
+const LANE_HASH_Y = [15, 18, 23, 28];
+
 /**
  * Simplified half-court diagram. Coordinates are normalized 0-1
  * (x: baseline-to-baseline width, y: sideline-to-sideline, basket near y=1).
@@ -63,6 +68,13 @@ export function ShotCourt({
           <rect x="1" y="1" width="98" height="92" fill="none" stroke="#cfd3cf" strokeWidth="0.6" />
           {/* free-throw lane ("the key"): 16ft wide, 19ft deep -> 32 x 38 units */}
           <rect x="34" y="1" width="32" height="38" fill="none" stroke="#cfd3cf" strokeWidth="0.6" />
+          {/* lane hash marks (rebounding-position blocks) on both sides */}
+          {LANE_HASH_Y.map((y) => (
+            <g key={y}>
+              <line x1="32" y1={y} x2="34" y2={y} stroke="#cfd3cf" strokeWidth="0.5" />
+              <line x1="66" y1={y} x2="68" y2={y} stroke="#cfd3cf" strokeWidth="0.5" />
+            </g>
+          ))}
           {/* free-throw line + circle, centered on the lane's far edge (the free-throw line itself IS the lane's bottom edge, drawn above) */}
           <circle cx="50" cy="39" r="12" fill="none" stroke="#cfd3cf" strokeWidth="0.6" />
           {/* backboard — a flat line 4ft from the baseline */}
@@ -71,9 +83,16 @@ export function ShotCourt({
           <path d="M 42.5 11.5 A 7.5 7.5 0 0 0 57.5 11.5" fill="none" stroke="#cfd3cf" strokeWidth="0.5" />
           {/* rim, out in front of the backboard */}
           <circle cx="50" cy="11.5" r="1.5" fill="none" stroke="#cfd3cf" strokeWidth="0.6" />
-          {/* three-point arc */}
+          {/*
+            Three-point line: straight corner segments (3ft from each
+            sideline, i.e. x=7/93 at this scale) running from the baseline
+            up to where a real 23.75ft-radius arc centered on the rim
+            (50, 11.5) would cross that line, then the arc itself between
+            those two points — not a single smooth arc like before, which
+            skipped the corner-3 straight segments your reference shows.
+          */}
           <path
-            d="M 4 30 A 46 46 0 0 0 96 30"
+            d="M 7 1 L 7 31.7 A 47.5 47.5 0 0 0 93 31.7 L 93 1"
             fill="none"
             stroke="#cfd3cf"
             strokeWidth="0.6"
