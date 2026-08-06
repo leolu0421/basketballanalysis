@@ -8,7 +8,11 @@ import {
 import { LocalVideoPlayer } from "@/components/local-video-player";
 import { ShotCourt } from "@/components/shot-court";
 import { STAT_LABELS, STAT_TYPES, isShotType, type StatType } from "@/lib/stat-types";
-import { logStatEventAction, deleteStatEventAction } from "@/lib/actions/match-actions";
+import {
+  logStatEventAction,
+  deleteStatEventAction,
+  updateStatEventAction,
+} from "@/lib/actions/match-actions";
 import { VideoAnalysisPanel } from "./video-analysis-panel";
 import { UploadVideoForm } from "./upload-video-form";
 
@@ -75,6 +79,12 @@ export function TaggingWorkspace({
   const [quarter, setQuarter] = useState(1);
   const [pendingShotType, setPendingShotType] = useState<StatType | null>(null);
   const [isPending, startTransition] = useTransition();
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<{
+    playerId: string;
+    type: StatType;
+    quarter: number;
+  } | null>(null);
   const playerRef = useRef<YoutubePlayerHandle>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
 
@@ -128,6 +138,26 @@ export function TaggingWorkspace({
     if (!pendingShotType) return;
     logEvent(pendingShotType, x, y);
     setPendingShotType(null);
+  }
+
+  function startEditEvent(e: StatEvent) {
+    setEditingEventId(e.id);
+    setEditDraft({ playerId: e.playerId, type: e.type as StatType, quarter: e.quarter });
+  }
+
+  function cancelEditEvent() {
+    setEditingEventId(null);
+    setEditDraft(null);
+  }
+
+  function saveEditEvent() {
+    if (!editingEventId || !editDraft) return;
+    const eventId = editingEventId;
+    startTransition(async () => {
+      await updateStatEventAction(eventId, matchId, editDraft);
+    });
+    setEditingEventId(null);
+    setEditDraft(null);
   }
 
   const shots = events
@@ -260,6 +290,71 @@ export function TaggingWorkspace({
               .reverse()
               .map((e) => {
                 const player = players.find((p) => p.id === e.playerId);
+
+                if (editingEventId === e.id && editDraft) {
+                  return (
+                    <li
+                      key={e.id}
+                      className="flex flex-wrap items-center gap-1.5 rounded-lg bg-brand/5 px-2 py-1.5"
+                    >
+                      <select
+                        value={editDraft.playerId}
+                        onChange={(ev) =>
+                          setEditDraft({ ...editDraft, playerId: ev.target.value })
+                        }
+                        className="rounded border border-black/10 bg-white px-1.5 py-1 text-xs"
+                      >
+                        {players.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            #{p.jerseyNumber} {p.firstName}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={editDraft.type}
+                        onChange={(ev) =>
+                          setEditDraft({ ...editDraft, type: ev.target.value as StatType })
+                        }
+                        className="rounded border border-black/10 bg-white px-1.5 py-1 text-xs"
+                      >
+                        {STAT_TYPES.map((type) => (
+                          <option key={type} value={type}>
+                            {STAT_LABELS[type]}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={editDraft.quarter}
+                        onChange={(ev) =>
+                          setEditDraft({ ...editDraft, quarter: Number(ev.target.value) })
+                        }
+                        className="rounded border border-black/10 bg-white px-1.5 py-1 text-xs"
+                      >
+                        {[1, 2, 3, 4].map((q) => (
+                          <option key={q} value={q}>
+                            Q{q}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="ml-auto flex items-center gap-2">
+                        <button
+                          onClick={saveEditEvent}
+                          disabled={isPending}
+                          className="text-xs font-medium text-navy hover:underline disabled:opacity-40"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={cancelEditEvent}
+                          className="text-xs text-black/50 hover:underline"
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    </li>
+                  );
+                }
+
                 return (
                   <li
                     key={e.id}
@@ -274,14 +369,22 @@ export function TaggingWorkspace({
                         </span>
                       )}
                     </span>
-                    <button
-                      onClick={() =>
-                        startTransition(() => deleteStatEventAction(e.id, matchId))
-                      }
-                      className="text-xs text-red-500 hover:underline"
-                    >
-                      Undo
-                    </button>
+                    <span className="flex items-center gap-3">
+                      <button
+                        onClick={() => startEditEvent(e)}
+                        className="text-xs text-navy hover:underline"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() =>
+                          startTransition(() => deleteStatEventAction(e.id, matchId))
+                        }
+                        className="text-xs text-red-500 hover:underline"
+                      >
+                        Undo
+                      </button>
+                    </span>
                   </li>
                 );
               })}

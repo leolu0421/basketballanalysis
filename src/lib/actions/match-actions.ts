@@ -6,7 +6,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireTeam } from "@/lib/current-user";
 import { extractYoutubeId } from "@/lib/youtube";
-import { STAT_TYPES } from "@/lib/stat-types";
+import { STAT_TYPES, isShotType } from "@/lib/stat-types";
 
 export type MatchActionState = { error?: string } | undefined;
 
@@ -156,7 +156,61 @@ export async function deleteStatEventAction(eventId: string, matchId: string) {
   const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
   if (!match) throw new Error("Match not found");
 
-  await prisma.statEvent.delete({ where: { id: eventId } });
+  // Scoped to this match, not just this id — deleteMany with both matchId
+  // and id means an eventId that doesn't actually belong to this match (a
+  // stale/tampered client value) deletes nothing instead of reaching into
+  // whatever match it actually belongs to, even one on another team.
+  await prisma.statEvent.deleteMany({ where: { id: eventId, matchId } });
+  revalidatePath(`/matches/${matchId}`);
+  revalidatePath("/stats");
+  revalidatePath("/performance");
+}
+
+const statEventUpdateSchema = z.object({
+  playerId: z.string().min(1),
+  type: z.enum(STAT_TYPES),
+  quarter: z.coerce.number().int().min(1).max(6),
+});
+
+/**
+ * Lets a coach correct an already-logged event's player, type, and/or
+ * quarter in place, instead of the only prior option (delete + re-log from
+ * scratch, losing the original video timestamp/shot location in the
+ * process). Scoped the same way deleteStatEventAction now is.
+ */
+export async function updateStatEventAction(
+  eventId: string,
+  matchId: string,
+  input: { playerId: string; type: string; quarter: number }
+) {
+  const { team } = await requireTeam();
+  const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
+  if (!match) throw new Error("Match not found");
+
+  const parsed = statEventUpdateSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new Error(parsed.error.issues[0]?.message ?? "Invalid stat event");
+  }
+
+  const player = await prisma.player.findFirst({
+    where: { id: parsed.data.playerId, teamId: team.id },
+  });
+  if (!player) throw new Error("Player not found");
+
+  await prisma.statEvent.updateMany({
+    where: { id: eventId, matchId },
+    data: {
+      playerId: parsed.data.playerId,
+      type: parsed.data.type,
+      quarter: parsed.data.quarter,
+      // A shot location only means something for a shot type — if the
+      // corrected type isn't one, clear it rather than leave a stale
+      // shotX/shotY that would keep plotting on the shot chart for an
+      // event that's no longer a shot.
+      ...(isShotType(parsed.data.type) ? {} : { shotX: null, shotY: null }),
+    },
+  });
+
   revalidatePath(`/matches/${matchId}`);
   revalidatePath("/stats");
   revalidatePath("/performance");
