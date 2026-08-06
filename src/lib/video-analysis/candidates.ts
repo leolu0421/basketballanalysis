@@ -66,6 +66,34 @@ function parseScorePair(text: string): [number, number] | null {
  * candidates from transient OCR errors — the better trade here since a
  * coach can always log a missed basket manually, but a wrong AI guess
  * actively misleads.
+ *
+ * Confirmed in production (see the "Localized: 1" AnalysisSummary
+ * investigation): a single-slot version of this confirmation rule — only
+ * ever remembering the ONE most recent not-yet-confirmed reading — silently
+ * destroyed real data whenever two or more real baskets happened close
+ * enough together that a new score got superseded by the NEXT real basket
+ * before it ever got the chance to repeat. Each of those in-between
+ * readings was individually a perfectly ordinary, plausible single-basket
+ * delta — they just never happened to recur, because the game had already
+ * moved on by the following sample. The single-slot version threw every one
+ * of them away and produced ONE oversized candidate spanning the whole
+ * burst (first score -> whatever value finally did repeat), with a combined
+ * delta across several baskets — exactly the "both sides changed" and
+ * "long merged gap" patterns seen in production, both of which then got
+ * excluded from localization entirely by isPlausibleScoreDelta downstream,
+ * since a multi-basket delta has no single scoring player to attribute.
+ *
+ * Fixed by remembering the WHOLE chain of distinct readings seen since the
+ * last confirmed score, not just the latest one. A repeat of the chain's
+ * most recent entry still confirms it — the anti-misread guarantee above is
+ * unchanged, nothing is ever trusted without recurring — but confirming now
+ * walks the entire chain and emits one candidate per link (confirmed ->
+ * link1, link1 -> link2, ...) instead of collapsing everything straight
+ * from the original confirmed score to the final value. This function still
+ * doesn't filter by delta plausibility itself (that stays isPlausibleScoreDelta's
+ * job, applied per-link downstream in pipeline.ts) — it only fixes
+ * detection, so a genuine burst of real baskets now produces several
+ * individually-attributable candidates instead of one useless merged one.
  */
 export type BuildCandidatesStats = {
   visibleReads: number;
@@ -86,53 +114,61 @@ export function buildScoreCandidates(
   if (sorted.length === 0) return candidates;
 
   let confirmed = { index: sorted[0].frameIndex, scoreText: sorted[0].scoreText };
-  let pending: { index: number; scoreText: string } | null = null;
+  // Every distinct reading seen since `confirmed`, in the order first seen —
+  // NOT just the single latest one. See the doc comment above for why a
+  // single slot here used to silently drop real, back-to-back baskets.
+  let chain: { index: number; scoreText: string }[] = [];
+
+  const discardChain = (reason: string) => {
+    for (const link of chain) {
+      if (stats) stats.discardedUnconfirmed++;
+      console.log(
+        `[video-analysis] discarded unconfirmed reading "${link.scoreText}" at ~${link.index * frameIntervalSeconds}s (${reason})`
+      );
+    }
+    chain = [];
+  };
 
   for (let i = 1; i < sorted.length; i++) {
     const read = sorted[i];
 
     if (read.scoreText === confirmed.scoreText) {
-      if (pending) {
-        if (stats) stats.discardedUnconfirmed++;
-        console.log(
-          `[video-analysis] discarded unconfirmed reading "${pending.scoreText}" at ~${pending.index * frameIntervalSeconds}s (reverted to "${confirmed.scoreText}")`
-        );
-      }
-      pending = null; // back to the known-good score — any pending change was a blip
+      // Back to the known-good score — the whole chain built up since then
+      // (if any) was a blip/replay/misread that never actually stuck.
+      discardChain(`reverted to "${confirmed.scoreText}"`);
       continue;
     }
 
     if (stats) stats.rawChangesDetected++;
 
-    if (pending && read.scoreText !== pending.scoreText) {
-      if (stats) stats.discardedUnconfirmed++;
-      console.log(
-        `[video-analysis] discarded unconfirmed reading "${pending.scoreText}" at ~${pending.index * frameIntervalSeconds}s (next read was "${read.scoreText}", not a repeat)`
-      );
-    }
-
-    if (pending && read.scoreText === pending.scoreText) {
-      const midpointIndex = (confirmed.index + pending.index) / 2;
-      candidates.push({
-        videoTimestampSeconds: midpointIndex * frameIntervalSeconds,
-        previousScoreText: confirmed.scoreText,
-        scoreText: pending.scoreText,
-        gapStartSeconds: confirmed.index * frameIntervalSeconds,
-        gapEndSeconds: pending.index * frameIntervalSeconds,
-      });
+    const lastLink = chain[chain.length - 1];
+    if (lastLink && read.scoreText === lastLink.scoreText) {
+      // The most recent hypothesis just recurred — confirm the ENTIRE chain
+      // that led up to it, not just this last link, emitting one candidate
+      // per step.
+      let prev = confirmed;
+      for (const link of chain) {
+        const midpointIndex = (prev.index + link.index) / 2;
+        candidates.push({
+          videoTimestampSeconds: midpointIndex * frameIntervalSeconds,
+          previousScoreText: prev.scoreText,
+          scoreText: link.scoreText,
+          gapStartSeconds: prev.index * frameIntervalSeconds,
+          gapEndSeconds: link.index * frameIntervalSeconds,
+        });
+        prev = link;
+      }
       confirmed = { index: read.frameIndex, scoreText: read.scoreText };
-      pending = null;
+      chain = [];
     } else {
-      pending = { index: read.frameIndex, scoreText: read.scoreText };
+      // A new distinct reading — appended alongside any earlier ones in the
+      // chain (not overwriting them), so it isn't lost if a DIFFERENT real
+      // basket supersedes it before it gets the chance to repeat itself.
+      chain.push({ index: read.frameIndex, scoreText: read.scoreText });
     }
   }
 
-  if (pending) {
-    if (stats) stats.discardedUnconfirmed++;
-    console.log(
-      `[video-analysis] discarded unconfirmed reading "${pending.scoreText}" at ~${pending.index * frameIntervalSeconds}s (never re-confirmed before scoreboard reads ran out)`
-    );
-  }
+  discardChain("never re-confirmed before scoreboard reads ran out");
 
   return candidates;
 }
