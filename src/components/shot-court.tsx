@@ -75,8 +75,15 @@ export function ShotCourt({
               <line x1="66" y1={y} x2="68" y2={y} stroke="#cfd3cf" strokeWidth="0.5" />
             </g>
           ))}
-          {/* free-throw line + circle, centered on the lane's far edge (the free-throw line itself IS the lane's bottom edge, drawn above) */}
-          <circle cx="50" cy="39" r="12" fill="none" stroke="#cfd3cf" strokeWidth="0.6" />
+          {/*
+            Free-throw semicircle — only the outer half (bulging away from
+            the basket, into open court), not a full circle: the inner half
+            would just retrace the lane's own top edge, and real court
+            diagrams (including the reference image) only draw the outer
+            half as a solid line. The free-throw LINE itself is the lane
+            rect's bottom edge, drawn above.
+          */}
+          <path d="M 38 39 A 12 12 0 0 0 62 39" fill="none" stroke="#cfd3cf" strokeWidth="0.6" />
           {/* backboard — a flat line 4ft from the baseline */}
           <line x1="44" y1="9" x2="56" y2="9" stroke="#cfd3cf" strokeWidth="0.8" />
           {/* restricted-area ("no charge") arc, 4ft radius centered on the rim */}
