@@ -13,21 +13,24 @@ const LIVE_LINKS = [
 
 const SOON_LINKS = ["Assistant Coach", "Resources", "Credits"];
 
-export function SidebarNav() {
+/**
+ * Horizontal nav row under the header (replaces the old left sidebar — see
+ * DashboardLayout). Same links, same active-state logic, just laid out
+ * left-to-right instead of top-to-bottom.
+ */
+export function TopNav() {
   const pathname = usePathname();
 
   return (
-    <nav className="flex flex-col gap-1 px-3">
+    <nav className="flex items-center gap-1 overflow-x-auto px-6 pb-3">
       {LIVE_LINKS.map((link) => {
         const active = pathname.startsWith(link.href);
         return (
           <Link
             key={link.href}
             href={link.href}
-            className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-              active
-                ? "bg-brand/15 text-navy"
-                : "text-black/70 hover:bg-black/5"
+            className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+              active ? "bg-brand/15 text-navy" : "text-black/70 hover:bg-black/5"
             }`}
           >
             {link.label}
@@ -35,11 +38,11 @@ export function SidebarNav() {
         );
       })}
 
-      <div className="mt-2 border-t border-black/5 pt-2">
+      <div className="ml-1 flex items-center gap-1 border-l border-black/5 pl-2">
         {SOON_LINKS.map((label) => (
           <div
             key={label}
-            className="flex items-center justify-between rounded-lg px-3 py-2 text-sm text-black/30"
+            className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-sm text-black/30"
             title="Coming soon"
           >
             {label}

@@ -1,8 +1,12 @@
 import { requireTeam } from "@/lib/current-user";
-import { SidebarNav } from "@/components/sidebar-nav";
+import { TopNav } from "@/components/top-nav";
 import { logoutAction } from "@/lib/actions/auth-actions";
 import { Logo } from "@/components/logo";
 
+// Top-nav layout — a single header (logo + team + horizontal nav row +
+// avatar) with full-width content below it, no left sidebar. Previously a
+// left sidebar + separate top bar; changed to look structurally distinct
+// from that (unrelated to the AI pipeline — a coach-facing UI request).
 export default async function DashboardLayout({
   children,
 }: {
@@ -17,35 +21,33 @@ export default async function DashboardLayout({
     .toUpperCase();
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="flex h-16 shrink-0 items-center justify-between bg-brand px-6">
-        <Logo monochrome />
-        <form action={logoutAction}>
-          <button
-            type="submit"
-            title="Log out"
-            className="flex h-9 w-9 items-center justify-center rounded-full bg-navy text-sm font-bold text-white"
-          >
-            {initials}
-          </button>
-        </form>
-      </header>
-
-      <div className="flex flex-1">
-        <aside className="flex w-64 shrink-0 flex-col border-r border-black/5 bg-white py-4">
-          <div className="mb-4 px-4">
-            <p className="text-sm font-semibold text-navy">
+    <div className="min-h-screen bg-background">
+      <header className="border-b border-black/5 bg-white">
+        <div className="flex h-16 items-center gap-6 px-6">
+          <Logo />
+          <div className="hidden sm:block">
+            <p className="text-sm font-semibold leading-tight text-navy">
               {team.division ?? team.name}
             </p>
             {team.division && (
-              <p className="text-xs text-black/50">{team.name}</p>
+              <p className="text-xs leading-tight text-black/50">{team.name}</p>
             )}
           </div>
-          <SidebarNav />
-        </aside>
+          <div className="flex-1" />
+          <form action={logoutAction}>
+            <button
+              type="submit"
+              title="Log out"
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-navy text-sm font-bold text-white"
+            >
+              {initials}
+            </button>
+          </form>
+        </div>
+        <TopNav />
+      </header>
 
-        <main className="flex-1 bg-background p-6">{children}</main>
-      </div>
+      <main className="p-6">{children}</main>
     </div>
   );
 }
