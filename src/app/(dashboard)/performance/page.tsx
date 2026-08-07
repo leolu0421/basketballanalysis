@@ -114,6 +114,9 @@ export default async function PerformancePage() {
                 <th className="py-2">Player</th>
                 <th className="py-2">#</th>
                 <th className="py-2">PTS</th>
+                <th className="py-2" title="Efficiency: (PTS+REB+AST+STL+BLK) − missed FG − missed FT − TOV, summed across every game this season">
+                  EFF
+                </th>
                 <th className="py-2">FPTS</th>
               </tr>
             </thead>
@@ -125,6 +128,7 @@ export default async function PerformancePage() {
                   </td>
                   <td className="py-2 text-black/50">{player.jerseyNumber}</td>
                   <td className="py-2 font-semibold">{line.pts}</td>
+                  <td className="py-2">{line.eff.toFixed(0)}</td>
                   <td className="py-2">{line.fpts.toFixed(1)}</td>
                 </tr>
               ))}
