@@ -145,7 +145,10 @@ export async function logStatEventAction(input: {
   });
   if (!match) throw new Error("Match not found");
 
-  await prisma.statEvent.create({ data: parsed.data });
+  // Logged directly by a coach watching the video -- eligible as benchmark
+  // ground truth from the moment it's created (unlike confirmCandidateAction's
+  // AI_CONFIRMED rows, or pre-existing UNKNOWN rows). See StatEvent.source.
+  await prisma.statEvent.create({ data: { ...parsed.data, source: "MANUAL" } });
   revalidatePath(`/matches/${parsed.data.matchId}`);
   revalidatePath("/stats");
   revalidatePath("/performance");
@@ -214,4 +217,29 @@ export async function updateStatEventAction(
   revalidatePath(`/matches/${matchId}`);
   revalidatePath("/stats");
   revalidatePath("/performance");
+}
+
+/**
+ * The explicit, one-at-a-time human action that turns a pre-existing
+ * UNKNOWN-provenance StatEvent into trusted MANUAL benchmark ground truth
+ * (or reverts a mistaken mark back to UNKNOWN) -- e.g. re-reviewing a
+ * benchmark match's already-logged events and confirming which ones were
+ * really typed from scratch. Deliberately can't be pointed at
+ * AI_CONFIRMED -- that source is set only by confirmCandidateAction and
+ * always means "came from an AI suggestion," never editable by hand.
+ */
+export async function markStatEventSourceAction(
+  eventId: string,
+  matchId: string,
+  source: "MANUAL" | "UNKNOWN"
+) {
+  const { team } = await requireTeam();
+  const match = await prisma.match.findFirst({ where: { id: matchId, teamId: team.id } });
+  if (!match) throw new Error("Match not found");
+
+  await prisma.statEvent.updateMany({
+    where: { id: eventId, matchId, source: { not: "AI_CONFIRMED" } },
+    data: { source },
+  });
+  revalidatePath(`/matches/${matchId}`);
 }

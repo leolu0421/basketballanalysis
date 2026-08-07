@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { getAnalysisSummaries } from "@/lib/actions/eval-actions";
 import { setBenchmarkMatchAction } from "@/lib/actions/match-actions";
+import { getBenchmarkEvaluations, getGroundTruthCounts, evaluateJobAction } from "@/lib/actions/benchmark-eval-actions";
+import { DEFAULT_MATCH_TOLERANCE_SECONDS } from "@/lib/benchmark-eval";
 
 function formatSeconds(seconds: number | null) {
   if (seconds == null) return "—";
@@ -75,6 +77,13 @@ export default async function EvalPage({
 
   const summaries = await getAnalysisSummaries({ benchmarkOnly, sort });
 
+  const benchmarkMatchIds = [...new Set(summaries.filter((s) => s.match.isBenchmark).map((s) => s.match.id))];
+  const [evaluations, groundTruthCounts] = await Promise.all([
+    getBenchmarkEvaluations(),
+    getGroundTruthCounts(benchmarkMatchIds),
+  ]);
+  const evaluationByJobId = new Map(evaluations.map((e) => [e.jobId, e]));
+
   const otherSort = sort === "asc" ? "desc" : "asc";
   const benchmarkFilterHref = benchmarkOnly ? `?sort=${sort}` : `?sort=${sort}&benchmarkOnly=1`;
 
@@ -135,6 +144,18 @@ export default async function EvalPage({
                   {col.label}
                 </th>
               ))}
+              <th
+                className="cursor-help px-3 py-2 text-right underline decoration-dotted"
+                title="MANUAL-source StatEvent rows on this benchmark match — the fixed answer key accuracy is scored against. AI_CONFIRMED and UNKNOWN rows don't count."
+              >
+                Ground truth
+              </th>
+              <th
+                className="cursor-help px-3 py-2 text-right underline decoration-dotted"
+                title="Precision / Recall / F1 for this run against the match's MANUAL ground truth — requires same player, same stat type, and timestamp within tolerance to count as correct. Green > 80%, yellow 50-80%, red < 50%."
+              >
+                Accuracy (F1)
+              </th>
               <th className="px-3 py-2">Benchmark</th>
             </tr>
           </thead>
@@ -210,6 +231,47 @@ export default async function EvalPage({
                     {formatSeconds(s.totalProcessingSeconds)}
                   </Link>
                 </td>
+                <td className="px-3 py-2 text-right">
+                  {s.match.isBenchmark ? (groundTruthCounts[s.match.id] ?? 0) : "—"}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {(() => {
+                    if (!s.match.isBenchmark) return <span className="text-black/40">—</span>;
+                    const evaluation = evaluationByJobId.get(s.jobId);
+                    const groundTruthCount = groundTruthCounts[s.match.id] ?? 0;
+                    if (!evaluation) {
+                      if (groundTruthCount === 0) {
+                        return <span className="text-black/40">No ground truth</span>;
+                      }
+                      return (
+                        <form action={evaluateJobAction.bind(null, s.jobId, DEFAULT_MATCH_TOLERANCE_SECONDS)}>
+                          <button
+                            type="submit"
+                            className="rounded-lg border border-black/10 px-2 py-1 text-xs font-medium text-navy hover:border-brand"
+                          >
+                            Evaluate
+                          </button>
+                        </form>
+                      );
+                    }
+                    return (
+                      <div className="flex items-center justify-end gap-2">
+                        <span className={`font-semibold ${confidenceColorClass(evaluation.f1)}`}>
+                          {formatConfidence(evaluation.f1)}
+                        </span>
+                        <form action={evaluateJobAction.bind(null, s.jobId, DEFAULT_MATCH_TOLERANCE_SECONDS)}>
+                          <button
+                            type="submit"
+                            title="Re-evaluate — e.g. after adding more ground truth"
+                            className="text-xs text-black/40 hover:text-navy hover:underline"
+                          >
+                            ↻
+                          </button>
+                        </form>
+                      </div>
+                    );
+                  })()}
+                </td>
                 <td className="px-3 py-2">
                   <form action={setBenchmarkMatchAction.bind(null, s.match.id, !s.match.isBenchmark)}>
                     <button
@@ -228,7 +290,7 @@ export default async function EvalPage({
             ))}
             {summaries.length === 0 && (
               <tr>
-                <td colSpan={13} className="px-3 py-10 text-center text-black/40">
+                <td colSpan={15} className="px-3 py-10 text-center text-black/40">
                   No analysis runs recorded yet{benchmarkOnly ? " for benchmark matches" : ""}.
                 </td>
               </tr>

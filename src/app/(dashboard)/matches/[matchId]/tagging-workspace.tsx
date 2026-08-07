@@ -12,6 +12,7 @@ import {
   logStatEventAction,
   deleteStatEventAction,
   updateStatEventAction,
+  markStatEventSourceAction,
 } from "@/lib/actions/match-actions";
 import { VideoAnalysisPanel } from "./video-analysis-panel";
 import { UploadVideoForm } from "./upload-video-form";
@@ -31,6 +32,7 @@ type StatEvent = {
   videoTimestampSeconds: number | null;
   shotX: number | null;
   shotY: number | null;
+  source: string;
 };
 
 type VideoAnalysisJob = {
@@ -65,6 +67,7 @@ export function TaggingWorkspace({
   players,
   events,
   initialVideoJob,
+  isBenchmark,
 }: {
   matchId: string;
   youtubeVideoId: string | null;
@@ -72,6 +75,7 @@ export function TaggingWorkspace({
   players: Player[];
   events: StatEvent[];
   initialVideoJob: VideoAnalysisJob;
+  isBenchmark: boolean;
 }) {
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(
     players[0]?.id ?? null
@@ -368,8 +372,40 @@ export function TaggingWorkspace({
                           {formatTime(e.videoTimestampSeconds)}
                         </span>
                       )}
+                      {isBenchmark && e.source === "MANUAL" && (
+                        <span
+                          title="Used as benchmark ground truth"
+                          className="ml-2 rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700"
+                        >
+                          ✓ Ground truth
+                        </span>
+                      )}
+                      {isBenchmark && e.source === "AI_CONFIRMED" && (
+                        <span
+                          title="Confirmed from an AI suggestion — never usable as ground truth"
+                          className="ml-2 rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-semibold text-black/40"
+                        >
+                          AI-confirmed
+                        </span>
+                      )}
                     </span>
                     <span className="flex items-center gap-3">
+                      {isBenchmark && e.source !== "AI_CONFIRMED" && (
+                        <button
+                          onClick={() =>
+                            startTransition(() =>
+                              markStatEventSourceAction(
+                                e.id,
+                                matchId,
+                                e.source === "MANUAL" ? "UNKNOWN" : "MANUAL"
+                              )
+                            )
+                          }
+                          className="text-xs font-medium text-brand-dark hover:underline"
+                        >
+                          {e.source === "MANUAL" ? "Unmark ground truth" : "Mark as ground truth"}
+                        </button>
+                      )}
                       <button
                         onClick={() => startEditEvent(e)}
                         className="text-xs text-navy hover:underline"

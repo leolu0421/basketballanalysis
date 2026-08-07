@@ -169,6 +169,9 @@ export async function confirmCandidateAction(
           type: parsed.data.type,
           quarter: parsed.data.quarter,
           videoTimestampSeconds: candidate.videoTimestampSeconds,
+          // Came from an AI suggestion, not a from-scratch review -- never
+          // eligible as benchmark ground truth (see StatEvent.source).
+          source: "AI_CONFIRMED",
         },
       }),
       prisma.videoAnalysisCandidate.update({

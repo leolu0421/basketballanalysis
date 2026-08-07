@@ -71,6 +71,7 @@ model Match {
   videoAnalysisJobs VideoAnalysisJob[]
   referenceStats  ReferenceStatLine[]
   analysisSummaries AnalysisSummary[]
+  benchmarkEvaluations BenchmarkEvaluation[]
 }
 
 model ReferenceStatLine {
@@ -113,6 +114,7 @@ model VideoAnalysisJob {
   updatedAt    DateTime                 @updatedAt
   candidates   VideoAnalysisCandidate[]
   summary      AnalysisSummary?
+  benchmarkEvaluation BenchmarkEvaluation?
 }
 
 // Internal quality-assurance record, one per completed video-analysis job —
@@ -204,4 +206,54 @@ model StatEvent {
   shotX                  Float?
   shotY                  Float?
   createdAt              DateTime @default(now())
+  // Provenance -- "MANUAL" (coach watched the video and logged it directly,
+  // via logStatEventAction), "AI_CONFIRMED" (coach clicked Confirm on an AI
+  // Suggested Moment, via confirmCandidateAction), or "UNKNOWN" (the
+  // default for every row that existed before this column did -- its real
+  // provenance was never recorded, so `prisma db push`'s backfill must NOT
+  // silently promote it to MANUAL). Only MANUAL rows are ever eligible as
+  // benchmark ground truth (see benchmark-eval.ts) -- scoring the AI
+  // against its own AI_CONFIRMED output would be circular, and UNKNOWN rows
+  // haven't been vetted either way. markStatEventSourceAction is the only
+  // way an UNKNOWN row becomes MANUAL -- an explicit, one-at-a-time human
+  // decision, never a bulk/automatic reclassification.
+  source                 String   @default("UNKNOWN")
+}
+
+// One row per time a completed video-analysis job was scored against a
+// benchmark match's MANUAL-source StatEvent rows (src/lib/benchmark-eval.ts
+// does the actual matching/metrics; this just persists the result so /eval
+// and /eval/compare can show history and commit-over-commit deltas without
+// recomputing on every page load). Written only by an explicit "Evaluate"
+// action on /eval -- never automatically, never as a side effect of
+// analysis or of re-analysis, and never touching StatEvent,
+// VideoAnalysisCandidate, or any model/prompt file. jobId is unique so a
+// re-evaluation (e.g. after adding more ground truth) updates the same row
+// rather than accumulating duplicates for one run.
+model BenchmarkEvaluation {
+  id               String           @id @default(cuid())
+  jobId            String           @unique
+  job              VideoAnalysisJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  matchId          String
+  match            Match            @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  gitCommitHash    String?
+  evaluatedAt      DateTime         @default(now())
+  toleranceSeconds Float
+  groundTruthEventCount Int
+  aiEventCount     Int
+  truePositives    Int
+  falsePositives   Int
+  falseNegatives   Int
+  precision        Float
+  recall           Float
+  f1               Float
+  // { [playerId]: {truePositives,falsePositives,falseNegatives,precision,recall,f1} }
+  perPlayerBreakdown   Json
+  // { [statType]: {truePositives,falsePositives,falseNegatives,precision,recall,f1} }
+  perStatTypeBreakdown Json
+  // { [quarter]: {groundTruthEvents,truePositives,falseNegatives,recall} } -- recall only, see benchmark-eval.ts
+  perQuarterBreakdown  Json
+  // { [FalseNegativeStage]: count } -- see FALSE_NEGATIVE_STAGES in benchmark-eval.ts
+  falseNegativeStageBreakdown Json
+  createdAt        DateTime         @default(now())
 }

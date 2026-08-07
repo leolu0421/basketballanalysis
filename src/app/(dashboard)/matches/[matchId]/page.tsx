@@ -71,6 +71,7 @@ export default async function MatchDetailPage({
           players={players}
           events={events}
           initialVideoJob={videoJob}
+          isBenchmark={match.isBenchmark}
         />
       </div>
     </div>
