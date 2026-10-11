@@ -94,7 +94,7 @@ describe("buildScoreCandidates", () => {
     expect(candidates[0]).toMatchObject({
       previousScoreText: "19-18",
       scoreText: "21-18",
-      gapStartSeconds: 0,
+      gapStartSeconds: 1 * FRAME_INTERVAL,
       gapEndSeconds: 2 * FRAME_INTERVAL,
     });
     expect(candidates[1]).toMatchObject({
@@ -184,7 +184,33 @@ describe("isPlausibleScoreDelta", () => {
     expect(isPlausibleScoreDelta("19-24", "21-26")).toBe(false);
   });
 
-  it("passes through unparseable score text without blocking", () => {
-    expect(isPlausibleScoreDelta("??", "2-0")).toBe(true);
+  it("rejects unparseable score text instead of attributing it to a player", () => {
+    expect(isPlausibleScoreDelta("??", "2-0")).toBe(false);
+  });
+});
+
+describe("scoreboard OCR regressions", () => {
+  it("ignores repeated dropped digits without creating recovery baskets", () => {
+    const candidates = buildScoreCandidates([
+      read(0, "7-13"), read(1, "2-13"), read(2, "2-13"),
+      read(3, "9-13"), read(4, "9-13"),
+    ], FRAME_INTERVAL);
+    expect(candidates.map((c) => [c.previousScoreText, c.scoreText])).toEqual([["7-13", "9-13"]]);
+  });
+
+  it("drops an intermediate overshoot even when the endpoint repeats", () => {
+    const candidates = buildScoreCandidates([
+      read(0, "19-24"), read(1, "29-24"), read(2, "21-24"), read(3, "21-24"),
+    ], FRAME_INTERVAL);
+    expect(candidates.map((c) => [c.previousScoreText, c.scoreText])).toEqual([["19-24", "21-24"]]);
+  });
+
+  it("normalizes separators and ignores malformed readings", () => {
+    const candidates = buildScoreCandidates([
+      read(0, "bad"), read(1, " 10 : 8 "), read(2, "12–8"), read(3, "12-8"),
+    ], FRAME_INTERVAL);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].previousScoreText).toBe("10-8");
+    expect(candidates[0].scoreText).toBe("12-8");
   });
 });

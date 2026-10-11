@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
 import type { ScoreCandidate } from "./candidates";
+import { access } from "node:fs/promises";
 
 /**
  * Regression test for a real production bug: a shared trackingAvailable
@@ -68,6 +69,7 @@ const SUCCESSFUL_LOCALIZATION = {
 const roster = [{ id: "p1", jerseyNumber: "7", firstName: "Test", lastName: "Player" }];
 
 beforeEach(() => {
+  vi.mocked(access).mockRejectedValue(new Error("no trained jersey model"));
   spawnMock.mockReset();
   spawnMock.mockImplementation(() => makeFakeChild());
   guessCandidateFromTracksMock.mockReset();
@@ -86,6 +88,34 @@ function candidate(previousScoreText: string, scoreText: string, start: number):
 }
 
 describe("guessCandidatePlayers candidate isolation", () => {
+  it("does not assign a roster player when the model identifies a nonexistent scorer track", async () => {
+    const { guessCandidatePlayers } = await import("./pipeline");
+    guessCandidateFromTracksMock.mockResolvedValue({ trackId: 99, jerseyNumber: "7", statType: "FG2_MADE" });
+    const { results } = await guessCandidatePlayers("job1", [candidate("0-0", "2-0", 5)],
+      "/fake/video.mp4", "/fake/workdir", "/fake/frames", ["frame_00001.jpg"], roster);
+    expect(results[0]?.playerId).toBeNull();
+    expect(results[0]?.jerseyNumber).toBeNull();
+  });
+
+  it("does not resolve duplicate jersey numbers to an arbitrary player", async () => {
+    const { guessCandidatePlayers } = await import("./pipeline");
+    guessCandidateFromTracksMock.mockResolvedValue({ trackId: 1, jerseyNumber: "7", statType: "FG2_MADE" });
+    const { results } = await guessCandidatePlayers("job1", [candidate("0-0", "2-0", 5)],
+      "/fake/video.mp4", "/fake/workdir", "/fake/frames", ["frame_00001.jpg"],
+      [...roster, { ...roster[0], id: "p2" }]);
+    expect(results[0]?.playerId).toBeNull();
+  });
+
+  it("does not run the jersey classifier when no scorer track is identified", async () => {
+    const { guessCandidatePlayers } = await import("./pipeline");
+    vi.mocked(access).mockResolvedValue(undefined);
+    guessCandidateFromTracksMock.mockResolvedValue({ trackId: null, jerseyNumber: null, statType: "FG2_MADE" });
+    const { results } = await guessCandidatePlayers("job1", [candidate("0-0", "2-0", 5)],
+      "/fake/video.mp4", "/fake/workdir", "/fake/frames", ["frame_00001.jpg"], roster);
+    expect(results[0]?.playerId).toBeNull();
+    expect(spawnMock.mock.calls.some((call) => call[1].some((arg: string) => arg.endsWith("classify_jersey.py")))).toBe(false);
+  });
+
   it("a tracking failure on candidate 0 does not prevent candidate 1 from being processed", async () => {
     const { guessCandidatePlayers } = await import("./pipeline");
 

@@ -164,10 +164,10 @@ function resolvePlayerId(
   roster: RosterPlayer[]
 ): string | null {
   if (!jerseyNumber) return null;
-  const player = roster.find(
+  const players = roster.filter(
     (p) => p.jerseyNumber.trim().toLowerCase() === jerseyNumber.trim().toLowerCase()
   );
-  return player?.id ?? null;
+  return players.length === 1 ? players[0].id : null;
 }
 
 /**
@@ -324,8 +324,7 @@ async function trackCandidate(
  * For each score-change candidate, tries to identify the scoring player via
  * the tracking + cropped-jersey pipeline first, falling back to the older
  * wide-frame guess if tracking isn't available on this host (or fails) —
- * once tracking fails once, later candidates skip straight to the fallback
- * rather than retrying a broken pipeline per candidate. Best-effort
+ * each candidate gets an independent tracking attempt. Best-effort
  * throughout: a failure just leaves a candidate unguessed rather than
  * failing the whole job, since the scoreboard candidates are still useful
  * on their own.
@@ -429,10 +428,12 @@ export async function guessCandidatePlayers(
           roster
         );
 
-        let jerseyNumber = guess.jerseyNumber;
-        if (useLocalModel) {
-          const allCrops = tracks.flatMap((t) => t.crops);
-          const predictions = await classifyCropsLocally(allCrops);
+        const scorerTrack = tracks.find((t) => t.trackId === guess.trackId);
+        let jerseyNumber = scorerTrack ? guess.jerseyNumber : null;
+        if (useLocalModel && scorerTrack) {
+          // Recognizing a bystander's jersey is not evidence they scored.
+          // Classify only the track selected as the scorer, never all players.
+          const predictions = await classifyCropsLocally(scorerTrack.crops);
           const best = predictions
             ?.filter((p) => p.confidence >= LOCAL_MODEL_CONFIDENCE_THRESHOLD)
             .filter((p) => resolvePlayerId(p.label, roster) !== null)

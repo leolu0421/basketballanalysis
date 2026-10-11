@@ -2,6 +2,7 @@ import Link from "next/link";
 import { requireTeam } from "@/lib/current-user";
 import { prisma } from "@/lib/prisma";
 import { NewMatchForm } from "./new-match-form";
+import { YoutubeImportForm } from "./youtube-import-form";
 
 export default async function MatchesPage() {
   const { team } = await requireTeam();
@@ -23,6 +24,8 @@ export default async function MatchesPage() {
         </p>
         <NewMatchForm />
       </div>
+
+      <YoutubeImportForm />
 
       <div className="mt-6 space-y-3">
         {matches.map((m) => {

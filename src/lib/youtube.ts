@@ -5,13 +5,15 @@ export function extractYoutubeId(input: string): string | null {
   try {
     const url = new URL(trimmed);
     if (url.hostname === "youtu.be") {
-      return url.pathname.slice(1) || null;
+      const id = url.pathname.slice(1);
+      return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
     }
-    if (url.hostname.includes("youtube.com")) {
+    if (["youtube.com", "www.youtube.com", "m.youtube.com"].includes(url.hostname)) {
       if (url.pathname === "/watch") {
-        return url.searchParams.get("v");
+        const id = url.searchParams.get("v") ?? "";
+        return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
       }
-      const embedMatch = url.pathname.match(/^\/(embed|shorts|live)\/([a-zA-Z0-9_-]{11})/);
+      const embedMatch = url.pathname.match(/^\/(embed|shorts|live)\/([a-zA-Z0-9_-]{11})\/?$/);
       if (embedMatch) return embedMatch[2];
     }
   } catch {

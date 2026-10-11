@@ -29,7 +29,7 @@ export type ScoreCandidate = {
 export function isPlausibleScoreDelta(previousScoreText: string, scoreText: string): boolean {
   const prev = parseScorePair(previousScoreText);
   const next = parseScorePair(scoreText);
-  if (!prev || !next) return true; // unparseable — don't block on a format we don't recognize
+  if (!prev || !next) return false;
 
   const [prevA, prevB] = prev;
   const [nextA, nextB] = next;
@@ -42,7 +42,7 @@ export function isPlausibleScoreDelta(previousScoreText: string, scoreText: stri
 }
 
 function parseScorePair(text: string): [number, number] | null {
-  const match = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(text);
+  const match = /^\s*(\d{1,3})\s*[-–—:]\s*(\d{1,3})\s*$/.exec(text);
   if (!match) return null;
   return [Number(match[1]), Number(match[2])];
 }
@@ -51,7 +51,8 @@ function parseScorePair(text: string): [number, number] | null {
  * Diffs a sequence of per-frame scoreboard reads and returns one candidate
  * for every point where the visible score text changed, with the timestamp
  * approximated as the midpoint between the last old-score read and the
- * first new-score read.
+ * first new-score read. Invalid text and regressive readings are ignored;
+ * official score corrections must be handled by a coach.
  *
  * Confirmed in production: a single misread frame (Claude vision reading
  * "21" when the board still said "19") produced a candidate that looked
@@ -86,10 +87,11 @@ function parseScorePair(text: string): [number, number] | null {
  * Fixed by remembering the WHOLE chain of distinct readings seen since the
  * last confirmed score, not just the latest one. A repeat of the chain's
  * most recent entry still confirms it — the anti-misread guarantee above is
- * unchanged, nothing is ever trusted without recurring — but confirming now
+ * applied to the endpoint — intermediate links remain hypotheses — but confirming now
  * walks the entire chain and emits one candidate per link (confirmed ->
  * link1, link1 -> link2, ...) instead of collapsing everything straight
- * from the original confirmed score to the final value. This function still
+ * from the original confirmed score to the final value. Regressive and
+ * overshooting intermediate readings are excluded. This function still
  * doesn't filter by delta plausibility itself (that stays isPlausibleScoreDelta's
  * job, applied per-link downstream in pipeline.ts) — it only fixes
  * detection, so a genuine burst of real baskets now produces several
@@ -106,9 +108,12 @@ export function buildScoreCandidates(
   frameIntervalSeconds: number,
   stats?: BuildCandidatesStats
 ): ScoreCandidate[] {
-  const sorted = [...reads]
-    .filter((r) => r.scoreVisible && r.scoreText)
-    .sort((a, b) => a.frameIndex - b.frameIndex) as (FrameRead & { scoreText: string })[];
+  const sorted = reads
+    .flatMap((r) => {
+      const score = r.scoreVisible && r.scoreText ? parseScorePair(r.scoreText) : null;
+      return score ? [{ ...r, scoreText: `${score[0]}-${score[1]}` }] : [];
+    })
+    .sort((a, b) => a.frameIndex - b.frameIndex);
   if (stats) stats.visibleReads = sorted.length;
   const candidates: ScoreCandidate[] = [];
   if (sorted.length === 0) return candidates;
@@ -131,11 +136,17 @@ export function buildScoreCandidates(
 
   for (let i = 1; i < sorted.length; i++) {
     const read = sorted[i];
+    const baseline = parseScorePair(confirmed.scoreText)!;
+    const current = parseScorePair(read.scoreText)!;
+    // A replay or dropped OCR digit must not become the baseline for
+    // subsequent player attribution. Score corrections require manual review.
+    if (current[0] < baseline[0] || current[1] < baseline[1]) continue;
 
     if (read.scoreText === confirmed.scoreText) {
       // Back to the known-good score — the whole chain built up since then
       // (if any) was a blip/replay/misread that never actually stuck.
       discardChain(`reverted to "${confirmed.scoreText}"`);
+      confirmed.index = read.frameIndex;
       continue;
     }
 
@@ -148,6 +159,15 @@ export function buildScoreCandidates(
       // per step.
       let prev = confirmed;
       for (const link of chain) {
+        const score = parseScorePair(link.scoreText)!;
+        const prior = parseScorePair(prev.scoreText)!;
+        // A repeated endpoint does not corroborate an intermediate OCR
+        // reading that overshoots it or decreases either team's score.
+        if (score[0] > current[0] || score[1] > current[1] ||
+            score[0] < prior[0] || score[1] < prior[1]) {
+          if (stats) stats.discardedUnconfirmed++;
+          continue;
+        }
         const midpointIndex = (prev.index + link.index) / 2;
         candidates.push({
           videoTimestampSeconds: midpointIndex * frameIntervalSeconds,

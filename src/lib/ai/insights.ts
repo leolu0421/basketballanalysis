@@ -1,8 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
+import { TEAM_INSIGHTS_MODEL } from "./models";
 
-export const AI_INSIGHTS_MODEL = "claude-opus-4-8";
+export const AI_INSIGHTS_MODEL = TEAM_INSIGHTS_MODEL;
 
 export function isAiConfigured() {
   return Boolean(process.env.ANTHROPIC_API_KEY);

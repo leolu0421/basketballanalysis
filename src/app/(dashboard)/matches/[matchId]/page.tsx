@@ -49,6 +49,9 @@ export default async function MatchDetailPage({
           </p>
         </div>
         <div className="flex items-center gap-4">
+          <a href={`/api/matches/${match.id}/dataset`} className="text-xs text-black/60 hover:underline">
+            Export video labels
+          </a>
           <ScoreForm
             matchId={match.id}
             teamScore={match.teamScore}

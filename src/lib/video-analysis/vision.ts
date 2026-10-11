@@ -2,8 +2,9 @@ import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import { VIDEO_ANALYSIS_MODEL } from "../ai/models";
 
-const CLAUDE_MODEL = "claude-opus-4-8";
+const CLAUDE_MODEL = VIDEO_ANALYSIS_MODEL;
 
 const FrameReadsSchema = z.object({
   reads: z.array(
@@ -60,8 +61,7 @@ function getClient() {
 function describeApiKey(): string {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return "MISSING (ANTHROPIC_API_KEY env var is not set)";
-  if (key.length < 16) return `present but suspiciously short (length ${key.length})`;
-  return `present, prefix="${key.slice(0, 14)}...", length=${key.length}`;
+  return "present";
 }
 
 /**
