@@ -295,7 +295,7 @@ async function trackCandidate(
 
   await run(
     "ffmpeg",
-    ["-ss", String(clipStart), "-i", videoPath, "-t", String(clipDuration), "-an", clipPath],
+    ["-nostdin", "-y", "-ss", String(clipStart), "-i", videoPath, "-t", String(clipDuration), "-an", clipPath],
     FFMPEG_CLIP_TIMEOUT_MS
   );
 

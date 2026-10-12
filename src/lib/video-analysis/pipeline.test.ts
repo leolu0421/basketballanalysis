@@ -88,6 +88,23 @@ function candidate(previousScoreText: string, scoreText: string, start: number):
 }
 
 describe("guessCandidatePlayers candidate isolation", () => {
+  it("overwrites the clip noninteractively when trying a second scoring frame", async () => {
+    const { guessCandidatePlayers } = await import("./pipeline");
+    localizeScoringMomentMock.mockResolvedValue({ ...SUCCESSFUL_LOCALIZATION,
+      topCandidates: [{ timestampSeconds: 10, confidence: 0.8 }, { timestampSeconds: 12, confidence: 0.7 }],
+    });
+    guessCandidateFromTracksMock
+      .mockResolvedValueOnce({ trackId: null, jerseyNumber: null, statType: null })
+      .mockResolvedValueOnce({ trackId: 1, jerseyNumber: "7", statType: "FG2_MADE" });
+    const { results } = await guessCandidatePlayers("job1", [candidate("0-0", "2-0", 5)],
+      "/fake/video.mp4", "/fake/workdir", "/fake/frames", ["frame_00001.jpg"], roster);
+    const clips = spawnMock.mock.calls.filter((call) => call[0] === "ffmpeg" && call[1].at(-1).endsWith(".mp4"));
+    expect(clips).toHaveLength(2);
+    expect(clips[0][1].at(-1)).toBe(clips[1][1].at(-1));
+    for (const call of clips) expect(call[1]).toEqual(expect.arrayContaining(["-nostdin", "-y"]));
+    expect(results[0]?.playerId).toBe("p1");
+  });
+
   it("does not assign a roster player when the model identifies a nonexistent scorer track", async () => {
     const { guessCandidatePlayers } = await import("./pipeline");
     guessCandidateFromTracksMock.mockResolvedValue({ trackId: 99, jerseyNumber: "7", statType: "FG2_MADE" });
